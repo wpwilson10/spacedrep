@@ -1,0 +1,39 @@
+[project]
+name = "spacedrep"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Agent-first flashcard CLI with FSRS scheduling and .apkg support"
+license = "MIT"
+dependencies = [
+    "typer>=0.15",
+    "fsrs>=6.3,<7",
+    "genanki>=0.13",
+    "pydantic>=2.0",
+    "beautifulsoup4>=4.12",
+]
+
+[project.scripts]
+spacedrep = "spacedrep.cli:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pyright>=1.1", "ruff>=0.11", "pre-commit>=4.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "TCH"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/spacedrep/commands/*.py" = ["B008"]
+"src/spacedrep/cli.py" = ["E402"]

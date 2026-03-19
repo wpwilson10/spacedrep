@@ -1,0 +1,473 @@
+"""SQLite schema and all database queries."""
+
+import json
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+
+from fsrs import Card, State
+
+from spacedrep import fsrs_engine
+from spacedrep.models import (
+    CardDue,
+    CardRecord,
+    DeckInfo,
+    DueCount,
+    OverallStats,
+    ReviewInput,
+    SessionStats,
+)
+
+_SQLITE_DT_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _to_sqlite_dt(dt: datetime) -> str:
+    """Convert a datetime to SQLite-compatible format (UTC, no timezone)."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
+    return dt.strftime(_SQLITE_DT_FMT)
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS decks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    source_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deck_id INTEGER NOT NULL REFERENCES decks(id),
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    extra_fields TEXT NOT NULL DEFAULT '{}',
+    tags TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    source_note_id INTEGER,
+    source_note_guid TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    suspended INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS fsrs_state (
+    card_id INTEGER PRIMARY KEY REFERENCES cards(id),
+    fsrs_card_json TEXT NOT NULL,
+    due TEXT NOT NULL,
+    state INTEGER NOT NULL DEFAULT 1,
+    stability REAL,
+    difficulty REAL,
+    last_review TEXT,
+    retrievability REAL
+);
+
+CREATE TABLE IF NOT EXISTS review_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id INTEGER NOT NULL REFERENCES cards(id),
+    rating INTEGER NOT NULL,
+    user_answer TEXT,
+    feedback TEXT,
+    reviewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    session_id TEXT,
+    fsrs_log_json TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_source_note
+    ON cards(source_note_id) WHERE source_note_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fsrs_due ON fsrs_state(due);
+CREATE INDEX IF NOT EXISTS idx_fsrs_state ON fsrs_state(state);
+CREATE INDEX IF NOT EXISTS idx_review_card ON review_logs(card_id, reviewed_at);
+CREATE INDEX IF NOT EXISTS idx_review_session ON review_logs(session_id);
+"""
+
+_TABLE_COUNT = 4
+
+
+def get_connection(db_path: Path) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode and foreign keys."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> int:
+    """Execute all CREATE TABLE/INDEX statements. Returns number of tables created."""
+    conn.executescript(_SCHEMA)
+    return _TABLE_COUNT
+
+
+# --- Deck operations ---
+
+
+def upsert_deck(conn: sqlite3.Connection, name: str, source_id: int | None = None) -> int:
+    """INSERT OR IGNORE by name, return deck ID."""
+    conn.execute(
+        "INSERT OR IGNORE INTO decks (name, source_id) VALUES (?, ?)",
+        (name, source_id),
+    )
+    row = conn.execute("SELECT id FROM decks WHERE name = ?", (name,)).fetchone()
+    return int(row["id"])
+
+
+def list_decks(conn: sqlite3.Connection) -> list[DeckInfo]:
+    """List all decks with card counts and due counts."""
+    rows = conn.execute("""
+        SELECT d.name,
+               COUNT(c.id) AS card_count,
+               COUNT(CASE WHEN fs.due <= datetime('now') AND c.suspended = 0
+                          THEN 1 END) AS due_count
+        FROM decks d
+        LEFT JOIN cards c ON c.deck_id = d.id
+        LEFT JOIN fsrs_state fs ON fs.card_id = c.id
+        GROUP BY d.id, d.name
+        ORDER BY d.name
+    """).fetchall()
+    return [
+        DeckInfo(name=r["name"], card_count=r["card_count"], due_count=r["due_count"]) for r in rows
+    ]
+
+
+# --- Card operations ---
+
+
+def insert_card(conn: sqlite3.Connection, card: CardRecord) -> int:
+    """Insert a card with dedup on source_note_id. Returns card ID."""
+    extra_json = json.dumps(card.extra_fields)
+
+    if card.source_note_id is not None:
+        existing = conn.execute(
+            "SELECT id FROM cards WHERE source_note_id = ?",
+            (card.source_note_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE cards SET question = ?, answer = ?, extra_fields = ?,
+                   tags = ?, source_note_guid = ?
+                   WHERE id = ?""",
+                (
+                    card.question,
+                    card.answer,
+                    extra_json,
+                    card.tags,
+                    card.source_note_guid,
+                    existing["id"],
+                ),
+            )
+            return int(existing["id"])
+
+    cursor = conn.execute(
+        """INSERT INTO cards (deck_id, question, answer, extra_fields, tags, source,
+           source_note_id, source_note_guid, suspended)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            card.deck_id,
+            card.question,
+            card.answer,
+            extra_json,
+            card.tags,
+            card.source,
+            card.source_note_id,
+            card.source_note_guid,
+            int(card.suspended),
+        ),
+    )
+    card_id = cursor.lastrowid
+    if card_id is None:
+        msg = "Failed to insert card"
+        raise RuntimeError(msg)
+    insert_initial_fsrs_state(conn, card_id)
+    return card_id
+
+
+def get_card(conn: sqlite3.Connection, card_id: int) -> CardRecord | None:
+    """Get a card by ID."""
+    row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row is None:
+        return None
+    return _row_to_card_record(row)
+
+
+def get_next_due_card(conn: sqlite3.Connection) -> CardDue | None:
+    """Get the next due card. Returns None when nothing is due."""
+    row = conn.execute("""
+        SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
+               c.tags, c.extra_fields,
+               fs.state, fs.last_review, fs.fsrs_card_json
+        FROM cards c
+        JOIN fsrs_state fs ON fs.card_id = c.id
+        JOIN decks d ON d.id = c.deck_id
+        WHERE fs.due <= datetime('now') AND c.suspended = 0
+        ORDER BY fs.due ASC
+        LIMIT 1
+    """).fetchone()
+    if row is None:
+        return None
+
+    fsrs_card = fsrs_engine.deserialize_card(row["fsrs_card_json"])
+    retrievability = fsrs_engine.get_retrievability(fsrs_card)
+    state = fsrs_engine.state_name(State(row["state"]), row["last_review"])
+    extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
+
+    return CardDue(
+        card_id=row["card_id"],
+        question=row["question"],
+        answer=row["answer"],
+        deck=row["deck"],
+        tags=row["tags"],
+        state=state,
+        retrievability=round(retrievability, 4),
+        extra_fields=extra_parsed,
+    )
+
+
+def suspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Suspend a card. Returns False if not found."""
+    cursor = conn.execute("UPDATE cards SET suspended = 1 WHERE id = ?", (card_id,))
+    return cursor.rowcount > 0
+
+
+def unsuspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Unsuspend a card. Returns False if not found."""
+    cursor = conn.execute("UPDATE cards SET suspended = 0 WHERE id = ?", (card_id,))
+    return cursor.rowcount > 0
+
+
+def get_all_cards(conn: sqlite3.Connection, deck_id: int | None = None) -> list[CardRecord]:
+    """Get all cards, optionally filtered by deck."""
+    if deck_id is not None:
+        rows = conn.execute("SELECT * FROM cards WHERE deck_id = ?", (deck_id,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM cards").fetchall()
+    return [_row_to_card_record(r) for r in rows]
+
+
+# --- FSRS state operations ---
+
+
+def get_fsrs_card(conn: sqlite3.Connection, card_id: int) -> Card | None:
+    """Deserialize the FSRS card for a given card_id."""
+    row = conn.execute(
+        "SELECT fsrs_card_json FROM fsrs_state WHERE card_id = ?", (card_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return fsrs_engine.deserialize_card(row["fsrs_card_json"])
+
+
+def update_fsrs_state(
+    conn: sqlite3.Connection, card_id: int, fsrs_card: Card, retrievability: float
+) -> None:
+    """Update FSRS state with serialized card and denormalized columns."""
+    last_review_str: str | None = None
+    if fsrs_card.last_review is not None:
+        last_review_str = _to_sqlite_dt(fsrs_card.last_review)
+
+    due_str = _to_sqlite_dt(fsrs_card.due) if fsrs_card.due else _to_sqlite_dt(datetime.now(UTC))
+
+    conn.execute(
+        """UPDATE fsrs_state
+           SET fsrs_card_json = ?, due = ?, state = ?, stability = ?,
+               difficulty = ?, last_review = ?, retrievability = ?
+           WHERE card_id = ?""",
+        (
+            fsrs_engine.serialize_card(fsrs_card),
+            due_str,
+            fsrs_card.state.value,
+            fsrs_card.stability,
+            fsrs_card.difficulty,
+            last_review_str,
+            retrievability,
+            card_id,
+        ),
+    )
+
+
+def insert_initial_fsrs_state(conn: sqlite3.Connection, card_id: int) -> None:
+    """Create an FSRS state row with a fresh card."""
+    card = fsrs_engine.create_new_card()
+    due_str = _to_sqlite_dt(card.due) if card.due else _to_sqlite_dt(datetime.now(UTC))
+    conn.execute(
+        """INSERT INTO fsrs_state (card_id, fsrs_card_json, due, state, stability,
+           difficulty, last_review, retrievability)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            card_id,
+            fsrs_engine.serialize_card(card),
+            due_str,
+            card.state.value,
+            card.stability,
+            card.difficulty,
+            None,
+            0.0,
+        ),
+    )
+
+
+# --- Review / stats operations ---
+
+
+def insert_review_log(conn: sqlite3.Connection, review: ReviewInput, fsrs_log_json: str) -> None:
+    """Insert a review log entry."""
+    conn.execute(
+        """INSERT INTO review_logs (card_id, rating, user_answer, feedback,
+           session_id, fsrs_log_json)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            review.card_id,
+            review.rating,
+            review.user_answer,
+            review.feedback,
+            review.session_id,
+            fsrs_log_json,
+        ),
+    )
+
+
+def get_due_count(conn: sqlite3.Connection) -> DueCount:
+    """Count due cards grouped by state."""
+    rows = conn.execute("""
+        SELECT fs.state, fs.last_review, COUNT(*) AS cnt
+        FROM fsrs_state fs
+        JOIN cards c ON c.id = fs.card_id
+        WHERE fs.due <= datetime('now') AND c.suspended = 0
+        GROUP BY fs.state, CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END
+    """).fetchall()
+
+    new = 0
+    learning = 0
+    review = 0
+    for r in rows:
+        state_val = r["state"]
+        cnt = r["cnt"]
+        if state_val == State.Learning.value and r["last_review"] is None:
+            new += cnt
+        elif state_val == State.Learning.value:
+            learning += cnt
+        elif state_val == State.Review.value:
+            review += cnt
+        else:  # Relearning
+            learning += cnt
+
+    return DueCount(total_due=new + learning + review, learning=learning, review=review, new=new)
+
+
+def get_next_due_time(conn: sqlite3.Connection) -> str | None:
+    """Get the next due time for any non-suspended card after now."""
+    row = conn.execute("""
+        SELECT MIN(fs.due) AS next_due
+        FROM fsrs_state fs
+        JOIN cards c ON c.id = fs.card_id
+        WHERE fs.due > datetime('now') AND c.suspended = 0
+    """).fetchone()
+    if row is None or row["next_due"] is None:
+        return None
+    return str(row["next_due"])
+
+
+def get_session_stats(conn: sqlite3.Connection, session_id: str) -> SessionStats:
+    """Get stats for a specific review session."""
+    rows = conn.execute(
+        "SELECT rating, COUNT(*) AS cnt FROM review_logs WHERE session_id = ? GROUP BY rating",
+        (session_id,),
+    ).fetchall()
+
+    again = hard = good = easy = 0
+    for r in rows:
+        rating = int(r["rating"])
+        match rating:
+            case 1:
+                again = int(r["cnt"])
+            case 2:
+                hard = int(r["cnt"])
+            case 3:
+                good = int(r["cnt"])
+            case 4:
+                easy = int(r["cnt"])
+            case _:
+                pass
+
+    reviewed = again + hard + good + easy
+    accuracy = (good + easy) / reviewed if reviewed > 0 else 0.0
+    return SessionStats(
+        reviewed=reviewed,
+        again=again,
+        hard=hard,
+        good=good,
+        easy=easy,
+        accuracy=round(accuracy, 4),
+    )
+
+
+def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
+    """Get overall database statistics."""
+    total = conn.execute("SELECT COUNT(*) AS cnt FROM cards").fetchone()
+    total_cards = total["cnt"] if total else 0
+
+    due_row = conn.execute("""
+        SELECT COUNT(*) AS cnt FROM fsrs_state fs
+        JOIN cards c ON c.id = fs.card_id
+        WHERE fs.due <= datetime('now') AND c.suspended = 0
+    """).fetchone()
+    due_now = due_row["cnt"] if due_row else 0
+
+    state_rows = conn.execute("""
+        SELECT fs.state, fs.last_review, COUNT(*) AS cnt
+        FROM fsrs_state fs
+        JOIN cards c ON c.id = fs.card_id
+        WHERE c.suspended = 0
+        GROUP BY fs.state, CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END
+    """).fetchall()
+
+    learning = 0
+    review = 0
+    for r in state_rows:
+        if r["state"] == State.Learning.value and r["last_review"] is not None:
+            learning += r["cnt"]
+        elif r["state"] == State.Review.value:
+            review += r["cnt"]
+        elif r["state"] == State.Relearning.value:
+            learning += r["cnt"]
+
+    mature_row = conn.execute("""
+        SELECT COUNT(*) AS cnt FROM fsrs_state
+        WHERE stability IS NOT NULL AND stability > 21
+    """).fetchone()
+    mature = mature_row["cnt"] if mature_row else 0
+
+    avg_ret_row = conn.execute("""
+        SELECT AVG(retrievability) AS avg_ret FROM fsrs_state
+        WHERE retrievability IS NOT NULL AND last_review IS NOT NULL
+    """).fetchone()
+    avg_retention = avg_ret_row["avg_ret"] if avg_ret_row and avg_ret_row["avg_ret"] else 0.0
+
+    return OverallStats(
+        total_cards=total_cards,
+        due_now=due_now,
+        learning=learning,
+        review=review,
+        mature=mature,
+        avg_retention=round(float(avg_retention), 4),
+    )
+
+
+# --- Helpers ---
+
+
+def _row_to_card_record(row: sqlite3.Row) -> CardRecord:
+    """Convert a database row to a CardRecord."""
+    extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
+    return CardRecord(
+        id=row["id"],
+        deck_id=row["deck_id"],
+        question=row["question"],
+        answer=row["answer"],
+        extra_fields=extra_parsed,
+        tags=row["tags"],
+        source=row["source"],
+        source_note_id=row["source_note_id"],
+        source_note_guid=row["source_note_guid"],
+        created_at=row["created_at"],
+        suspended=bool(row["suspended"]),
+    )

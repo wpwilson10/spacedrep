@@ -1,0 +1,72 @@
+"""Typer app entry point and output helpers."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import typer
+from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from spacedrep.core import SpacedrepError
+
+app = typer.Typer(
+    name="spacedrep",
+    help="Agent-first flashcard CLI with FSRS scheduling and .apkg support",
+    no_args_is_help=True,
+)
+
+DB_DEFAULT = typer.Option(Path("./reviews.db"), "--db", help="Path to SQLite database")
+
+
+def output_json(data: BaseModel | dict[str, Any] | list[Any]) -> None:
+    """Serialize to JSON and write to stdout."""
+    if isinstance(data, BaseModel):
+        sys.stdout.write(data.model_dump_json())
+    else:
+        sys.stdout.write(json.dumps(data, default=str))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def output_error(err: SpacedrepError) -> None:
+    """Write error JSON to stdout."""
+    error_data: dict[str, object] = {
+        "error": err.error_code,
+        "message": err.message,
+        "suggestion": err.suggestion,
+        **err.extra,
+    }
+    sys.stdout.write(json.dumps(error_data, default=str))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    version: bool | None = typer.Option(None, "--version", "-v", help="Show version"),
+) -> None:
+    """Agent-first flashcard CLI with FSRS scheduling and .apkg support."""
+    if version:
+        typer.echo("spacedrep 0.1.0")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+
+
+# Register subcommands
+from spacedrep.commands.card import card_app  # noqa: E402
+from spacedrep.commands.db_cmd import db_app  # noqa: E402
+from spacedrep.commands.deck import deck_app  # noqa: E402
+from spacedrep.commands.review import review_app  # noqa: E402
+from spacedrep.commands.stats import stats_app  # noqa: E402
+
+app.add_typer(db_app)
+app.add_typer(card_app)
+app.add_typer(review_app)
+app.add_typer(deck_app)
+app.add_typer(stats_app)

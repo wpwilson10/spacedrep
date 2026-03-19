@@ -12,6 +12,7 @@ from spacedrep.models import (
     CardDue,
     CardRecord,
     DeckInfo,
+    DeckRecord,
     DueCount,
     OverallStats,
     ReviewInput,
@@ -126,6 +127,17 @@ def list_decks(conn: sqlite3.Connection) -> list[DeckInfo]:
     """).fetchall()
     return [
         DeckInfo(name=r["name"], card_count=r["card_count"], due_count=r["due_count"]) for r in rows
+    ]
+
+
+def get_deck_records(conn: sqlite3.Connection) -> list[DeckRecord]:
+    """Get all decks as DeckRecord (with IDs)."""
+    rows = conn.execute(
+        "SELECT id, name, source_id, created_at FROM decks ORDER BY name"
+    ).fetchall()
+    return [
+        DeckRecord(id=r["id"], name=r["name"], source_id=r["source_id"], created_at=r["created_at"])
+        for r in rows
     ]
 
 
@@ -328,11 +340,13 @@ def insert_review_log(conn: sqlite3.Connection, review: ReviewInput, fsrs_log_js
 def get_due_count(conn: sqlite3.Connection) -> DueCount:
     """Count due cards grouped by state."""
     rows = conn.execute("""
-        SELECT fs.state, fs.last_review, COUNT(*) AS cnt
+        SELECT fs.state,
+               CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END AS is_new,
+               COUNT(*) AS cnt
         FROM fsrs_state fs
         JOIN cards c ON c.id = fs.card_id
         WHERE fs.due <= datetime('now') AND c.suspended = 0
-        GROUP BY fs.state, CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END
+        GROUP BY fs.state, is_new
     """).fetchall()
 
     new = 0
@@ -341,7 +355,7 @@ def get_due_count(conn: sqlite3.Connection) -> DueCount:
     for r in rows:
         state_val = r["state"]
         cnt = r["cnt"]
-        if state_val == State.Learning.value and r["last_review"] is None:
+        if state_val == State.Learning.value and r["is_new"]:
             new += cnt
         elif state_val == State.Learning.value:
             learning += cnt
@@ -413,17 +427,19 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
     due_now = due_row["cnt"] if due_row else 0
 
     state_rows = conn.execute("""
-        SELECT fs.state, fs.last_review, COUNT(*) AS cnt
+        SELECT fs.state,
+               CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END AS is_new,
+               COUNT(*) AS cnt
         FROM fsrs_state fs
         JOIN cards c ON c.id = fs.card_id
         WHERE c.suspended = 0
-        GROUP BY fs.state, CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END
+        GROUP BY fs.state, is_new
     """).fetchall()
 
     learning = 0
     review = 0
     for r in state_rows:
-        if r["state"] == State.Learning.value and r["last_review"] is not None:
+        if r["state"] == State.Learning.value and not r["is_new"]:
             learning += r["cnt"]
         elif r["state"] == State.Review.value:
             review += r["cnt"]

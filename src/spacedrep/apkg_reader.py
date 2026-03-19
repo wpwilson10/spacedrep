@@ -18,10 +18,11 @@ def read_apkg(
     apkg_path: Path,
     question_field: str | None = None,
     answer_field: str | None = None,
-) -> tuple[list[DeckRecord], list[CardRecord], dict[str, list[str] | str]]:
-    """Read an .apkg file and return (decks, cards, field_info).
+) -> tuple[list[DeckRecord], list[CardRecord], dict[str, list[str] | str], dict[int, str]]:
+    """Read an .apkg file and return (decks, cards, field_info, note_deck_map).
 
     field_info contains: fields (list of field names), question_field, answer_field.
+    note_deck_map maps source_note_id to deck name.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
@@ -68,6 +69,7 @@ def read_apkg(
             a_field = ""
             decks: list[DeckRecord] = []
             cards: list[CardRecord] = []
+            note_deck_map: dict[int, str] = {}
             seen_decks: set[str] = set()
 
             for note in notes:
@@ -107,6 +109,7 @@ def read_apkg(
                         )
                     )
 
+                note_deck_map[note["id"]] = deck_name
                 tags = note["tags"].strip() if note["tags"] else ""
 
                 cards.append(
@@ -127,7 +130,7 @@ def read_apkg(
                 "question_field": q_field,
                 "answer_field": a_field,
             }
-            return decks, cards, field_info
+            return decks, cards, field_info, note_deck_map
 
         finally:
             conn.close()

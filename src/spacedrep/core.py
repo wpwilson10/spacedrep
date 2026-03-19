@@ -3,12 +3,16 @@
 Both CLI and (future) MCP call these functions. No CLI or MCP dependencies.
 """
 
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from spacedrep import db, fsrs_engine
 from spacedrep.models import (
     CardDue,
     CardRecord,
+    CardSource,
     DeckInfo,
     DueCount,
     ImportResult,
@@ -60,7 +64,7 @@ class DatabaseNotFoundError(SpacedrepError):
 
 
 class InvalidRatingError(SpacedrepError):
-    def __init__(self, rating: int) -> None:
+    def __init__(self, rating: str) -> None:
         super().__init__(
             error_code="invalid_rating",
             message=f"Invalid rating: {rating}. Must be 1-4 (again/hard/good/easy)",
@@ -79,51 +83,44 @@ class ApkgImportError(SpacedrepError):
         )
 
 
-def _require_db(db_path: Path) -> None:
-    """Raise if the database file doesn't exist."""
-    if not db_path.exists():
+@contextmanager
+def _open_db(db_path: Path, *, require_exists: bool = True) -> Iterator[sqlite3.Connection]:
+    """Open a database connection as a context manager."""
+    if require_exists and not db_path.exists():
         raise DatabaseNotFoundError(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_database(db_path: Path) -> dict[str, str | int]:
     """Initialize the database. Idempotent."""
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path, require_exists=False) as conn:
         tables = db.init_db(conn)
         conn.commit()
         return {"status": "ok", "tables_created": tables, "db": str(db_path)}
-    finally:
-        conn.close()
 
 
 def get_next_card(db_path: Path) -> CardDue | None:
     """Get the next due card for review."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         return db.get_next_due_card(conn)
-    finally:
-        conn.close()
 
 
 def get_next_due_time(db_path: Path) -> str | None:
     """Get the next due time when no cards are currently due."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         return db.get_next_due_time(conn)
-    finally:
-        conn.close()
 
 
 def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
     """Submit a review for a card."""
-    _require_db(db_path)
     if review.rating < 1 or review.rating > 4:
-        raise InvalidRatingError(review.rating)
+        raise InvalidRatingError(str(review.rating))
 
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         fsrs_card = db.get_fsrs_card(conn, review.card_id)
         if fsrs_card is None:
             raise CardNotFoundError(review.card_id)
@@ -149,8 +146,6 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
             difficulty=round(updated_card.difficulty or 0.0, 4),
             interval_days=interval_days,
         )
-    finally:
-        conn.close()
 
 
 def add_card(
@@ -159,53 +154,41 @@ def add_card(
     answer: str,
     deck: str = "Default",
     tags: str = "",
-    source: str = "manual",
+    source: CardSource = "manual",
 ) -> dict[str, int | str]:
     """Add a new card."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         deck_id = db.upsert_deck(conn, deck)
         card = CardRecord(
             deck_id=deck_id,
             question=question,
             answer=answer,
             tags=tags,
-            source=source,  # type: ignore[arg-type]
+            source=source,
         )
         card_id = db.insert_card(conn, card)
         conn.commit()
         return {"card_id": card_id, "deck": deck}
-    finally:
-        conn.close()
 
 
 def suspend_card(db_path: Path, card_id: int) -> bool:
     """Suspend a card. Returns False if not found."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         result = db.suspend_card(conn, card_id)
         conn.commit()
         if not result:
             raise CardNotFoundError(card_id)
         return result
-    finally:
-        conn.close()
 
 
 def unsuspend_card(db_path: Path, card_id: int) -> bool:
     """Unsuspend a card. Returns False if not found."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         result = db.unsuspend_card(conn, card_id)
         conn.commit()
         if not result:
             raise CardNotFoundError(card_id)
         return result
-    finally:
-        conn.close()
 
 
 def import_deck(
@@ -217,42 +200,46 @@ def import_deck(
     """Import an .apkg file into the database."""
     from spacedrep.apkg_reader import read_apkg
 
-    _require_db(db_path)
+    if not db_path.exists():
+        raise DatabaseNotFoundError(db_path)
     if not apkg_path.exists():
         raise ApkgImportError(f"File not found: {apkg_path}")
 
     try:
-        decks, cards, field_info = read_apkg(apkg_path, question_field, answer_field)
+        decks, cards, field_info, note_deck_map = read_apkg(apkg_path, question_field, answer_field)
     except Exception as e:
         raise ApkgImportError(f"Failed to read .apkg: {e}") from e
 
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         imported = 0
         updated = 0
-        skipped = 0
-        deck_name = decks[0].name if decks else "Unknown"
+        first_deck = decks[0].name if decks else "Unknown"
 
         for deck_rec in decks:
             db.upsert_deck(conn, deck_rec.name, deck_rec.source_id)
 
         for card in cards:
-            deck_id = db.upsert_deck(conn, deck_name)
+            # Resolve per-card deck from the note→deck mapping
+            if card.source_note_id and card.source_note_id in note_deck_map:
+                card_deck = note_deck_map[card.source_note_id]
+            else:
+                card_deck = first_deck
+            deck_id = db.upsert_deck(conn, card_deck)
             card.deck_id = deck_id
 
-            if card.source_note_id is not None:
-                existing = conn.execute(
-                    "SELECT id FROM cards WHERE source_note_id = ?",
+            is_update = (
+                card.source_note_id is not None
+                and conn.execute(
+                    "SELECT 1 FROM cards WHERE source_note_id = ?",
                     (card.source_note_id,),
                 ).fetchone()
-                if existing:
-                    db.insert_card(conn, card)  # updates via dedup logic
-                    updated += 1
-                else:
-                    db.insert_card(conn, card)
-                    imported += 1
+                is not None
+            )
+
+            db.insert_card(conn, card)
+            if is_update:
+                updated += 1
             else:
-                db.insert_card(conn, card)
                 imported += 1
 
         conn.commit()
@@ -265,24 +252,18 @@ def import_deck(
         return ImportResult(
             imported=imported,
             updated=updated,
-            skipped=skipped,
-            deck=deck_name,
+            deck=first_deck,
             fields=fields_list,
             question_field=q_str,
             answer_field=a_str,
         )
-    finally:
-        conn.close()
 
 
 def export_deck(db_path: Path, output_path: Path, deck: str | None = None) -> int:
     """Export cards to an .apkg file. Returns count of exported cards."""
     from spacedrep.apkg_writer import write_apkg
-    from spacedrep.models import DeckRecord
 
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         deck_id: int | None = None
         if deck:
             row = conn.execute("SELECT id FROM decks WHERE name = ?", (deck,)).fetchone()
@@ -290,48 +271,29 @@ def export_deck(db_path: Path, output_path: Path, deck: str | None = None) -> in
                 deck_id = row["id"]
 
         cards = db.get_all_cards(conn, deck_id)
-        deck_records = db.list_decks(conn)
-        deck_recs = [DeckRecord(name=d.name) for d in deck_records]
+        deck_recs = db.get_deck_records(conn)
         return write_apkg(cards, deck_recs, output_path)
-    finally:
-        conn.close()
 
 
 def list_decks(db_path: Path) -> list[DeckInfo]:
     """List all decks with card and due counts."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         return db.list_decks(conn)
-    finally:
-        conn.close()
 
 
 def get_due_count(db_path: Path) -> DueCount:
     """Get count of due cards by state."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         return db.get_due_count(conn)
-    finally:
-        conn.close()
 
 
 def get_session_stats(db_path: Path, session_id: str) -> SessionStats:
     """Get stats for a review session."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         return db.get_session_stats(conn, session_id)
-    finally:
-        conn.close()
 
 
 def get_overall_stats(db_path: Path) -> OverallStats:
     """Get overall database statistics."""
-    _require_db(db_path)
-    conn = db.get_connection(db_path)
-    try:
+    with _open_db(db_path) as conn:
         return db.get_overall_stats(conn)
-    finally:
-        conn.close()

@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+CardSource = Literal["apkg", "manual", "generated"]
+
 
 class DeckRecord(BaseModel):
     id: int | None = None
@@ -20,7 +22,7 @@ class CardRecord(BaseModel):
     answer: str
     extra_fields: dict[str, str] = {}
     tags: str = ""
-    source: Literal["apkg", "manual", "generated"] = "manual"
+    source: CardSource = "manual"
     source_note_id: int | None = None
     source_note_guid: str | None = None
     created_at: datetime | None = None
@@ -76,7 +78,6 @@ class DeckInfo(BaseModel):
 class ImportResult(BaseModel):
     imported: int
     updated: int
-    skipped: int
     deck: str
     fields: list[str]
     question_field: str

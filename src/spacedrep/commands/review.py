@@ -30,7 +30,7 @@ def submit(
     """
     rating_int = _parse_rating(rating)
     if rating_int is None:
-        output_error(core.InvalidRatingError(0))
+        output_error(core.InvalidRatingError(rating))
         raise typer.Exit(code=2)
 
     review_input = ReviewInput(

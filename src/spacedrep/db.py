@@ -194,8 +194,12 @@ def get_deck_records(conn: sqlite3.Connection) -> list[DeckRecord]:
 # --- Card operations ---
 
 
-def insert_card(conn: sqlite3.Connection, card: CardRecord) -> int:
-    """Insert a card with dedup on source_note_id. Returns card ID."""
+def insert_card(conn: sqlite3.Connection, card: CardRecord) -> tuple[int, bool]:
+    """Insert a card with dedup on source_note_id.
+
+    Returns (card_id, was_update) — was_update is True if an existing card
+    was updated via source_note_id dedup.
+    """
     extra_json = json.dumps(card.extra_fields)
 
     if card.source_note_id is not None:
@@ -217,7 +221,7 @@ def insert_card(conn: sqlite3.Connection, card: CardRecord) -> int:
                     existing["id"],
                 ),
             )
-            return int(existing["id"])
+            return (int(existing["id"]), True)
 
     cursor = conn.execute(
         """INSERT INTO cards (deck_id, question, answer, extra_fields, tags, source,
@@ -240,15 +244,7 @@ def insert_card(conn: sqlite3.Connection, card: CardRecord) -> int:
         msg = "Failed to insert card"
         raise RuntimeError(msg)
     insert_initial_fsrs_state(conn, card_id)
-    return card_id
-
-
-def get_card(conn: sqlite3.Connection, card_id: int) -> CardRecord | None:
-    """Get a card by ID."""
-    row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
-    if row is None:
-        return None
-    return _row_to_card_record(row)
+    return (card_id, False)
 
 
 def get_next_due_card(

@@ -145,14 +145,9 @@ def update_card(
         spacedrep card update 1 --question "Updated question" --deck DSA
     """
     if question is None and answer is None and tags is None and deck is None:
-        output_json(
-            {
-                "error": "no_fields",
-                "message": "Provide at least one of --question, --answer, --tags, --deck",
-                "suggestion": "Use --question, --answer, --tags, or --deck",
-            }
-        )
-        raise typer.Exit(code=2) from None
+        err = core.NoFieldsProvidedError()
+        output_error(err)
+        raise typer.Exit(code=err.exit_code) from None
     try:
         result = core.update_card(
             db, card_id, question=question, answer=answer, tags=tags, deck=deck

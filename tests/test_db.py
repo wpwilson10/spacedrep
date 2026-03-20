@@ -35,13 +35,14 @@ def test_insert_and_get_card(tmp_db: Path) -> None:
         answer="X is Y.",
         tags="test",
     )
-    card_id = db.insert_card(conn, card)
+    card_id, was_update = db.insert_card(conn, card)
+    assert not was_update
     conn.commit()
 
-    retrieved = db.get_card(conn, card_id)
-    assert retrieved is not None
-    assert retrieved.question == "What is X?"
-    assert retrieved.answer == "X is Y."
+    detail = db.get_card_detail(conn, card_id)
+    assert detail is not None
+    assert detail.question == "What is X?"
+    assert detail.answer == "X is Y."
     conn.close()
 
 
@@ -56,7 +57,8 @@ def test_card_dedup_on_source_note_id(tmp_db: Path) -> None:
         source="apkg",
         source_note_id=12345,
     )
-    id1 = db.insert_card(conn, card1)
+    id1, was_update1 = db.insert_card(conn, card1)
+    assert not was_update1
 
     card2 = CardRecord(
         deck_id=deck_id,
@@ -65,13 +67,14 @@ def test_card_dedup_on_source_note_id(tmp_db: Path) -> None:
         source="apkg",
         source_note_id=12345,
     )
-    id2 = db.insert_card(conn, card2)
+    id2, was_update2 = db.insert_card(conn, card2)
+    assert was_update2
     conn.commit()
 
     assert id1 == id2
-    updated = db.get_card(conn, id1)
-    assert updated is not None
-    assert updated.question == "Updated Q"
+    detail = db.get_card_detail(conn, id1)
+    assert detail is not None
+    assert detail.question == "Updated Q"
     conn.close()
 
 
@@ -94,16 +97,16 @@ def test_suspend_unsuspend(populated_db: Path) -> None:
     assert db.suspend_card(conn, card_id)
     conn.commit()
 
-    card = db.get_card(conn, card_id)
-    assert card is not None
-    assert card.suspended
+    detail = db.get_card_detail(conn, card_id)
+    assert detail is not None
+    assert detail.suspended
 
     assert db.unsuspend_card(conn, card_id)
     conn.commit()
 
-    card = db.get_card(conn, card_id)
-    assert card is not None
-    assert not card.suspended
+    detail = db.get_card_detail(conn, card_id)
+    assert detail is not None
+    assert not detail.suspended
     conn.close()
 
 
@@ -238,7 +241,7 @@ def test_delete_card_success(populated_db_multi_deck: Path) -> None:
     conn.commit()
 
     # Card and FSRS state should be gone
-    assert db.get_card(conn, 1) is None
+    assert db.get_card_detail(conn, 1) is None
     fsrs = conn.execute("SELECT 1 FROM fsrs_state WHERE card_id = 1").fetchone()
     assert fsrs is None
     conn.close()
@@ -258,11 +261,11 @@ def test_update_card_question(populated_db_multi_deck: Path) -> None:
     assert db.update_card(conn, 1, question="Updated S3 question")
     conn.commit()
 
-    card = db.get_card(conn, 1)
-    assert card is not None
-    assert card.question == "Updated S3 question"
+    detail = db.get_card_detail(conn, 1)
+    assert detail is not None
+    assert detail.question == "Updated S3 question"
     # answer unchanged
-    assert card.answer == "Object storage"
+    assert detail.answer == "Object storage"
     conn.close()
 
 
@@ -272,9 +275,9 @@ def test_update_card_deck(populated_db_multi_deck: Path) -> None:
     assert db.update_card(conn, 1, deck_id=dsa_id)
     conn.commit()
 
-    card = db.get_card(conn, 1)
-    assert card is not None
-    assert card.deck_id == dsa_id
+    detail = db.get_card_detail(conn, 1)
+    assert detail is not None
+    assert detail.deck == "DSA"
     conn.close()
 
 

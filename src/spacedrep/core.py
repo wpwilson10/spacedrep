@@ -85,6 +85,16 @@ class InvalidStateError(SpacedrepError):
         )
 
 
+class NoFieldsProvidedError(SpacedrepError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="no_fields",
+            message="Provide at least one of --question, --answer, --tags, --deck",
+            suggestion="Use --question, --answer, --tags, or --deck",
+            exit_code=2,
+        )
+
+
 class ApkgImportError(SpacedrepError):
     def __init__(self, message: str) -> None:
         super().__init__(
@@ -195,7 +205,7 @@ def add_card(
             tags=tags,
             source=source,
         )
-        card_id = db.insert_card(conn, card)
+        card_id, _ = db.insert_card(conn, card)
         conn.commit()
         return {"card_id": card_id, "deck": deck}
 
@@ -266,9 +276,9 @@ def suspend_card(db_path: Path, card_id: int) -> bool:
     """Suspend a card. Returns False if not found."""
     with _open_db(db_path) as conn:
         result = db.suspend_card(conn, card_id)
-        conn.commit()
         if not result:
             raise CardNotFoundError(card_id)
+        conn.commit()
         return result
 
 
@@ -276,9 +286,9 @@ def unsuspend_card(db_path: Path, card_id: int) -> bool:
     """Unsuspend a card. Returns False if not found."""
     with _open_db(db_path) as conn:
         result = db.unsuspend_card(conn, card_id)
-        conn.commit()
         if not result:
             raise CardNotFoundError(card_id)
+        conn.commit()
         return result
 
 
@@ -316,17 +326,8 @@ def import_deck(
             deck_id = db.upsert_deck(conn, card_deck)
             card.deck_id = deck_id
 
-            is_update = (
-                card.source_note_id is not None
-                and conn.execute(
-                    "SELECT 1 FROM cards WHERE source_note_id = ?",
-                    (card.source_note_id,),
-                ).fetchone()
-                is not None
-            )
-
-            db.insert_card(conn, card)
-            if is_update:
+            _, was_update = db.insert_card(conn, card)
+            if was_update:
                 updated += 1
             else:
                 imported += 1

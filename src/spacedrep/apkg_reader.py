@@ -27,6 +27,10 @@ def read_apkg(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
         with zipfile.ZipFile(apkg_path, "r") as zf:
+            for member in zf.namelist():
+                if member.startswith("/") or ".." in member:
+                    msg = f"Refusing to extract potentially unsafe path: {member}"
+                    raise ValueError(msg)
             zf.extractall(tmppath)
 
         # Find the SQLite database

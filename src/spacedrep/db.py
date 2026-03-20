@@ -9,8 +9,11 @@ from fsrs import Card, State
 
 from spacedrep import fsrs_engine
 from spacedrep.models import (
+    CardDetail,
     CardDue,
+    CardListResult,
     CardRecord,
+    CardSummary,
     DeckInfo,
     DeckRecord,
     DueCount,
@@ -20,6 +23,8 @@ from spacedrep.models import (
 )
 
 _SQLITE_DT_FMT = "%Y-%m-%d %H:%M:%S"
+
+VALID_STATES = frozenset({"new", "learning", "review", "relearning"})
 
 
 def _to_sqlite_dt(dt: datetime) -> str:
@@ -97,6 +102,51 @@ def init_db(conn: sqlite3.Connection) -> int:
     """Execute all CREATE TABLE/INDEX statements. Returns number of tables created."""
     conn.executescript(_SCHEMA)
     return _TABLE_COUNT
+
+
+# --- Filter helper ---
+
+
+def _build_card_filter_clauses(
+    *,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    state: str | None = None,
+) -> tuple[str, list[str | int]]:
+    """Build SQL WHERE fragments for card filtering.
+
+    Returns (sql_fragment, params). The fragment uses AND-prefixed clauses
+    suitable for appending to an existing WHERE.
+    """
+    clauses: list[str] = []
+    params: list[str | int] = []
+
+    if deck is not None:
+        clauses.append("AND d.name = ?")
+        params.append(deck)
+
+    if tags:
+        tag_conditions: list[str] = []
+        for tag in tags:
+            tag_conditions.append("(',' || c.tags || ',') LIKE ?")
+            params.append(f"%,{tag},%")
+        clauses.append(f"AND ({' OR '.join(tag_conditions)})")
+
+    if state is not None:
+        if state == "new":
+            clauses.append("AND (fs.state = ? AND fs.last_review IS NULL)")
+            params.append(State.Learning.value)
+        elif state == "learning":
+            clauses.append("AND (fs.state = ? AND fs.last_review IS NOT NULL)")
+            params.append(State.Learning.value)
+        elif state == "review":
+            clauses.append("AND fs.state = ?")
+            params.append(State.Review.value)
+        elif state == "relearning":
+            clauses.append("AND fs.state = ?")
+            params.append(State.Relearning.value)
+
+    return (" ".join(clauses), params)
 
 
 # --- Deck operations ---
@@ -201,9 +251,16 @@ def get_card(conn: sqlite3.Connection, card_id: int) -> CardRecord | None:
     return _row_to_card_record(row)
 
 
-def get_next_due_card(conn: sqlite3.Connection) -> CardDue | None:
-    """Get the next due card. Returns None when nothing is due."""
-    row = conn.execute("""
+def get_next_due_card(
+    conn: sqlite3.Connection,
+    *,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    state: str | None = None,
+) -> CardDue | None:
+    """Get the next due card, optionally filtered. Returns None when nothing is due."""
+    filter_sql, filter_params = _build_card_filter_clauses(deck=deck, tags=tags, state=state)
+    query = f"""
         SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
                c.tags, c.extra_fields,
                fs.state, fs.last_review, fs.fsrs_card_json
@@ -211,15 +268,17 @@ def get_next_due_card(conn: sqlite3.Connection) -> CardDue | None:
         JOIN fsrs_state fs ON fs.card_id = c.id
         JOIN decks d ON d.id = c.deck_id
         WHERE fs.due <= datetime('now') AND c.suspended = 0
+        {filter_sql}
         ORDER BY fs.due ASC
         LIMIT 1
-    """).fetchone()
+    """
+    row = conn.execute(query, filter_params).fetchone()
     if row is None:
         return None
 
     fsrs_card = fsrs_engine.deserialize_card(row["fsrs_card_json"])
     retrievability = fsrs_engine.get_retrievability(fsrs_card)
-    state = fsrs_engine.state_name(State(row["state"]), row["last_review"])
+    card_state = fsrs_engine.state_name(State(row["state"]), row["last_review"])
     extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
 
     return CardDue(
@@ -228,10 +287,151 @@ def get_next_due_card(conn: sqlite3.Connection) -> CardDue | None:
         answer=row["answer"],
         deck=row["deck"],
         tags=row["tags"],
-        state=state,
+        state=card_state,
         retrievability=round(retrievability, 4),
         extra_fields=extra_parsed,
     )
+
+
+def list_cards(
+    conn: sqlite3.Connection,
+    *,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    state: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> CardListResult:
+    """List cards with optional filters, paginated."""
+    filter_sql, filter_params = _build_card_filter_clauses(deck=deck, tags=tags, state=state)
+
+    count_query = f"""
+        SELECT COUNT(*) AS cnt
+        FROM cards c
+        JOIN fsrs_state fs ON fs.card_id = c.id
+        JOIN decks d ON d.id = c.deck_id
+        WHERE 1=1 {filter_sql}
+    """
+    count_row = conn.execute(count_query, filter_params).fetchone()
+    total = int(count_row["cnt"]) if count_row else 0
+
+    data_query = f"""
+        SELECT c.id AS card_id, c.question, d.name AS deck, c.tags,
+               c.suspended, fs.state, fs.last_review, fs.due
+        FROM cards c
+        JOIN fsrs_state fs ON fs.card_id = c.id
+        JOIN decks d ON d.id = c.deck_id
+        WHERE 1=1 {filter_sql}
+        ORDER BY c.id ASC
+        LIMIT ? OFFSET ?
+    """
+    data_params: list[str | int] = [*filter_params, limit, offset]
+    rows = conn.execute(data_query, data_params).fetchall()
+
+    cards = [
+        CardSummary(
+            card_id=r["card_id"],
+            question=r["question"][:100],
+            deck=r["deck"],
+            tags=r["tags"],
+            state=fsrs_engine.state_name(State(r["state"]), r["last_review"]),
+            due=r["due"],
+            suspended=bool(r["suspended"]),
+        )
+        for r in rows
+    ]
+    return CardListResult(cards=cards, total=total, limit=limit, offset=offset)
+
+
+def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None:
+    """Get full card detail including FSRS state and review count."""
+    row = conn.execute(
+        """
+        SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
+               c.tags, c.extra_fields, c.source, c.suspended, c.created_at,
+               fs.state, fs.due, fs.stability, fs.difficulty,
+               fs.last_review, fs.fsrs_card_json,
+               (SELECT COUNT(*) FROM review_logs rl WHERE rl.card_id = c.id) AS review_count
+        FROM cards c
+        JOIN fsrs_state fs ON fs.card_id = c.id
+        JOIN decks d ON d.id = c.deck_id
+        WHERE c.id = ?
+        """,
+        (card_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    fsrs_card = fsrs_engine.deserialize_card(row["fsrs_card_json"])
+    retrievability = fsrs_engine.get_retrievability(fsrs_card)
+    extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
+    return CardDetail(
+        card_id=row["card_id"],
+        question=row["question"],
+        answer=row["answer"],
+        deck=row["deck"],
+        tags=row["tags"],
+        extra_fields=extra_parsed,
+        source=row["source"],
+        suspended=bool(row["suspended"]),
+        created_at=row["created_at"],
+        state=fsrs_engine.state_name(State(row["state"]), row["last_review"]),
+        due=row["due"],
+        stability=round(float(row["stability"] or 0.0), 4),
+        difficulty=round(float(row["difficulty"] or 0.0), 4),
+        retrievability=round(retrievability, 4),
+        last_review=row["last_review"],
+        review_count=row["review_count"],
+    )
+
+
+def delete_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Delete a card and its related data. Returns False if not found."""
+    existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if existing is None:
+        return False
+    conn.execute("DELETE FROM review_logs WHERE card_id = ?", (card_id,))
+    conn.execute("DELETE FROM fsrs_state WHERE card_id = ?", (card_id,))
+    conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    return True
+
+
+def update_card(
+    conn: sqlite3.Connection,
+    card_id: int,
+    *,
+    question: str | None = None,
+    answer: str | None = None,
+    tags: str | None = None,
+    deck_id: int | None = None,
+) -> bool:
+    """Update card fields. Only non-None values are changed. Returns False if not found."""
+    existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if existing is None:
+        return False
+
+    updates: list[str] = []
+    params: list[str | int] = []
+    if question is not None:
+        updates.append("question = ?")
+        params.append(question)
+    if answer is not None:
+        updates.append("answer = ?")
+        params.append(answer)
+    if tags is not None:
+        updates.append("tags = ?")
+        params.append(tags)
+    if deck_id is not None:
+        updates.append("deck_id = ?")
+        params.append(deck_id)
+
+    if updates:
+        params.append(card_id)
+        conn.execute(
+            f"UPDATE cards SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+    return True
 
 
 def suspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
@@ -447,14 +647,17 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
             learning += r["cnt"]
 
     mature_row = conn.execute("""
-        SELECT COUNT(*) AS cnt FROM fsrs_state
-        WHERE stability IS NOT NULL AND stability > 21
+        SELECT COUNT(*) AS cnt FROM fsrs_state fs
+        JOIN cards c ON c.id = fs.card_id
+        WHERE fs.stability IS NOT NULL AND fs.stability > 21 AND c.suspended = 0
     """).fetchone()
     mature = mature_row["cnt"] if mature_row else 0
 
     avg_ret_row = conn.execute("""
-        SELECT AVG(retrievability) AS avg_ret FROM fsrs_state
-        WHERE retrievability IS NOT NULL AND last_review IS NOT NULL
+        SELECT AVG(fs.retrievability) AS avg_ret FROM fsrs_state fs
+        JOIN cards c ON c.id = fs.card_id
+        WHERE fs.retrievability IS NOT NULL AND fs.last_review IS NOT NULL
+              AND c.suspended = 0
     """).fetchone()
     avg_retention = avg_ret_row["avg_ret"] if avg_ret_row and avg_ret_row["avg_ret"] else 0.0
 

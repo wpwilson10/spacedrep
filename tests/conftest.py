@@ -66,3 +66,51 @@ def populated_db(tmp_db: Path, sample_cards: list[CardRecord]) -> Path:
     conn.commit()
     conn.close()
     return tmp_db
+
+
+@pytest.fixture
+def populated_db_multi_deck(tmp_db: Path) -> Path:
+    """Database with cards in AWS and DSA decks with different tags."""
+    conn = db.get_connection(tmp_db)
+    aws_id = db.upsert_deck(conn, "AWS")
+    dsa_id = db.upsert_deck(conn, "DSA")
+
+    aws_cards = [
+        CardRecord(
+            deck_id=aws_id,
+            question="What is S3?",
+            answer="Object storage",
+            tags="s3,storage",
+        ),
+        CardRecord(
+            deck_id=aws_id,
+            question="What is EC2?",
+            answer="Virtual servers",
+            tags="compute",
+        ),
+        CardRecord(
+            deck_id=aws_id,
+            question="What is Lambda?",
+            answer="Serverless compute",
+            tags="compute,serverless",
+        ),
+    ]
+    dsa_cards = [
+        CardRecord(
+            deck_id=dsa_id,
+            question="What is a binary tree?",
+            answer="Tree with max 2 children",
+            tags="trees",
+        ),
+        CardRecord(
+            deck_id=dsa_id,
+            question="What is BFS?",
+            answer="Breadth-first search",
+            tags="graphs,search",
+        ),
+    ]
+    for card in aws_cards + dsa_cards:
+        db.insert_card(conn, card)
+    conn.commit()
+    conn.close()
+    return tmp_db

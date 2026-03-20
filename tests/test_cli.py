@@ -25,6 +25,16 @@ def _init_db(db_path: Path) -> None:
     assert result.returncode == 0
 
 
+def _add_card(
+    db_path: Path, question: str, answer: str, deck: str = "Default", tags: str = ""
+) -> None:
+    args = ["card", "add", question, answer, "--deck", deck]
+    if tags:
+        args.extend(["--tags", tags])
+    result = _run(args, db_path)
+    assert result.returncode == 0
+
+
 class TestHelp:
     def test_main_help(self) -> None:
         result = _run_bare(["--help"])
@@ -89,6 +99,195 @@ class TestCardCommands:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["suspended"] is False
+
+
+class TestCardList:
+    def test_list_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "list"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 0
+            assert data["cards"] == []
+
+    def test_list_with_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", deck="AWS", tags="s3")
+            _add_card(db_path, "Q2", "A2", deck="DSA", tags="trees")
+
+            result = _run(["card", "list"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 2
+            assert len(data["cards"]) == 2
+
+    def test_list_filter_by_deck(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", deck="AWS")
+            _add_card(db_path, "Q2", "A2", deck="DSA")
+
+            result = _run(["card", "list", "--deck", "AWS"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 1
+            assert data["cards"][0]["deck"] == "AWS"
+
+    def test_list_filter_by_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", tags="s3,storage")
+            _add_card(db_path, "Q2", "A2", tags="compute")
+
+            result = _run(["card", "list", "--tags", "s3"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 1
+
+    def test_list_pagination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+            _add_card(db_path, "Q2", "A2")
+            _add_card(db_path, "Q3", "A3")
+
+            result = _run(["card", "list", "--limit", "2", "--offset", "0"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert len(data["cards"]) == 2
+            assert data["total"] == 3
+
+
+class TestCardGet:
+    def test_get_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", deck="AWS", tags="s3")
+
+            result = _run(["card", "get", "1"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["card_id"] == 1
+            assert data["question"] == "Q1"
+            assert data["answer"] == "A1"
+            assert data["deck"] == "AWS"
+            assert data["state"] == "new"
+
+    def test_get_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "get", "999"], db_path)
+            assert result.returncode == 3
+            data = json.loads(result.stdout)
+            assert data["error"] == "card_not_found"
+
+
+class TestCardDelete:
+    def test_delete_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "delete", "1"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["card_id"] == 1
+            assert data["deleted"] is True
+
+    def test_delete_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "delete", "999"], db_path)
+            assert result.returncode == 3
+            data = json.loads(result.stdout)
+            assert data["error"] == "card_not_found"
+
+
+class TestCardUpdate:
+    def test_update_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "update", "1", "--question", "Updated Q"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["question"] == "Updated Q"
+            assert data["answer"] == "A1"
+
+    def test_update_deck_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", deck="AWS")
+
+            result = _run(["card", "update", "1", "--deck", "DSA"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["deck"] == "DSA"
+
+    def test_update_no_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "update", "1"], db_path)
+            assert result.returncode == 2
+            data = json.loads(result.stdout)
+            assert data["error"] == "no_fields"
+            assert "suggestion" in data
+
+    def test_update_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "update", "999", "--question", "nope"], db_path)
+            assert result.returncode == 3
+            data = json.loads(result.stdout)
+            assert data["error"] == "card_not_found"
+
+
+class TestCardNextFilters:
+    def test_next_with_deck(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", deck="AWS")
+            _add_card(db_path, "Q2", "A2", deck="DSA")
+
+            result = _run(["card", "next", "--deck", "DSA"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["deck"] == "DSA"
+
+    def test_next_with_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", tags="s3,storage")
+            _add_card(db_path, "Q2", "A2", tags="compute")
+
+            result = _run(["card", "next", "--tags", "compute"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert "compute" in data["tags"]
 
 
 class TestReview:

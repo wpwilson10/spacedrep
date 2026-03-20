@@ -128,3 +128,157 @@ def test_overall_stats(populated_db: Path) -> None:
     assert stats.total_cards == 3
     assert stats.due_now == 3
     conn.close()
+
+
+# --- Filter tests for get_next_due_card ---
+
+
+def test_get_next_due_card_by_deck(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    due = db.get_next_due_card(conn, deck="DSA")
+    assert due is not None
+    assert due.deck == "DSA"
+    conn.close()
+
+
+def test_get_next_due_card_by_tags(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    due = db.get_next_due_card(conn, tags=["s3"])
+    assert due is not None
+    assert "s3" in due.tags
+    conn.close()
+
+
+def test_get_next_due_card_by_state(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    due = db.get_next_due_card(conn, state="new")
+    assert due is not None
+    assert due.state == "new"
+
+    # No cards in "review" state yet
+    due_review = db.get_next_due_card(conn, state="review")
+    assert due_review is None
+    conn.close()
+
+
+# --- list_cards tests ---
+
+
+def test_list_cards_no_filter(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    result = db.list_cards(conn)
+    assert result.total == 5
+    assert len(result.cards) == 5
+    conn.close()
+
+
+def test_list_cards_pagination(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    page1 = db.list_cards(conn, limit=2, offset=0)
+    assert len(page1.cards) == 2
+    assert page1.total == 5
+
+    page2 = db.list_cards(conn, limit=2, offset=2)
+    assert len(page2.cards) == 2
+    assert page2.cards[0].card_id != page1.cards[0].card_id
+    conn.close()
+
+
+def test_list_cards_by_deck(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    result = db.list_cards(conn, deck="AWS")
+    assert result.total == 3
+    assert all(c.deck == "AWS" for c in result.cards)
+    conn.close()
+
+
+def test_list_cards_by_tags(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    result = db.list_cards(conn, tags=["compute"])
+    assert result.total == 2
+    assert all("compute" in c.tags for c in result.cards)
+    conn.close()
+
+
+def test_list_cards_by_state(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    result = db.list_cards(conn, state="new")
+    assert result.total == 5  # all cards are new
+    conn.close()
+
+
+# --- get_card_detail tests ---
+
+
+def test_get_card_detail_found(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    detail = db.get_card_detail(conn, 1)
+    assert detail is not None
+    assert detail.card_id == 1
+    assert detail.question == "What is S3?"
+    assert detail.deck == "AWS"
+    assert detail.state == "new"
+    assert detail.review_count == 0
+    conn.close()
+
+
+def test_get_card_detail_not_found(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    detail = db.get_card_detail(conn, 9999)
+    assert detail is None
+    conn.close()
+
+
+# --- delete_card tests ---
+
+
+def test_delete_card_success(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    assert db.delete_card(conn, 1)
+    conn.commit()
+
+    # Card and FSRS state should be gone
+    assert db.get_card(conn, 1) is None
+    fsrs = conn.execute("SELECT 1 FROM fsrs_state WHERE card_id = 1").fetchone()
+    assert fsrs is None
+    conn.close()
+
+
+def test_delete_card_not_found(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    assert not db.delete_card(conn, 9999)
+    conn.close()
+
+
+# --- update_card tests ---
+
+
+def test_update_card_question(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    assert db.update_card(conn, 1, question="Updated S3 question")
+    conn.commit()
+
+    card = db.get_card(conn, 1)
+    assert card is not None
+    assert card.question == "Updated S3 question"
+    # answer unchanged
+    assert card.answer == "Object storage"
+    conn.close()
+
+
+def test_update_card_deck(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    dsa_id = conn.execute("SELECT id FROM decks WHERE name = 'DSA'").fetchone()["id"]
+    assert db.update_card(conn, 1, deck_id=dsa_id)
+    conn.commit()
+
+    card = db.get_card(conn, 1)
+    assert card is not None
+    assert card.deck_id == dsa_id
+    conn.close()
+
+
+def test_update_card_not_found(populated_db_multi_deck: Path) -> None:
+    conn = db.get_connection(populated_db_multi_deck)
+    assert not db.update_card(conn, 9999, question="nope")
+    conn.close()

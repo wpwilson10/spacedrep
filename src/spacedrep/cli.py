@@ -52,7 +52,9 @@ def main(
 ) -> None:
     """Agent-first flashcard CLI with FSRS scheduling and .apkg support."""
     if version:
-        typer.echo("spacedrep 0.1.0")
+        from importlib.metadata import version as get_version
+
+        typer.echo(f"spacedrep {get_version('spacedrep')}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())

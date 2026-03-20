@@ -126,3 +126,94 @@ def test_full_flow() -> None:
 
         overall = core.get_overall_stats(db_path)
         assert overall.total_cards == 2
+
+
+# --- get_next_card filter tests ---
+
+
+def test_get_next_card_by_deck(populated_db_multi_deck: Path) -> None:
+    result = core.get_next_card(populated_db_multi_deck, deck="DSA")
+    assert result is not None
+    assert result.deck == "DSA"
+
+
+def test_get_next_card_by_tags(populated_db_multi_deck: Path) -> None:
+    result = core.get_next_card(populated_db_multi_deck, tags=["trees"])
+    assert result is not None
+    assert "trees" in result.tags
+
+
+def test_get_next_card_by_state(populated_db_multi_deck: Path) -> None:
+    result = core.get_next_card(populated_db_multi_deck, state="new")
+    assert result is not None
+    assert result.state == "new"
+
+
+def test_get_next_card_invalid_state(populated_db_multi_deck: Path) -> None:
+    with pytest.raises(core.InvalidStateError):
+        core.get_next_card(populated_db_multi_deck, state="invalid")
+
+
+# --- list_cards tests ---
+
+
+def test_list_cards_basic(populated_db_multi_deck: Path) -> None:
+    result = core.list_cards(populated_db_multi_deck)
+    assert result.total == 5
+    assert len(result.cards) == 5
+    assert result.limit == 50
+    assert result.offset == 0
+
+
+def test_list_cards_pagination(populated_db_multi_deck: Path) -> None:
+    result = core.list_cards(populated_db_multi_deck, limit=2, offset=0)
+    assert len(result.cards) == 2
+    assert result.total == 5
+
+
+# --- get_card_detail tests ---
+
+
+def test_get_card_detail_found(populated_db_multi_deck: Path) -> None:
+    detail = core.get_card_detail(populated_db_multi_deck, 1)
+    assert detail.card_id == 1
+    assert detail.question == "What is S3?"
+    assert detail.state == "new"
+
+
+def test_get_card_detail_not_found(populated_db_multi_deck: Path) -> None:
+    with pytest.raises(core.CardNotFoundError):
+        core.get_card_detail(populated_db_multi_deck, 9999)
+
+
+# --- delete_card tests ---
+
+
+def test_delete_card_success(populated_db_multi_deck: Path) -> None:
+    result = core.delete_card(populated_db_multi_deck, 1)
+    assert result["card_id"] == 1
+    assert result["deleted"] is True
+
+
+def test_delete_card_not_found(populated_db_multi_deck: Path) -> None:
+    with pytest.raises(core.CardNotFoundError):
+        core.delete_card(populated_db_multi_deck, 9999)
+
+
+# --- update_card tests ---
+
+
+def test_update_card_question(populated_db_multi_deck: Path) -> None:
+    detail = core.update_card(populated_db_multi_deck, 1, question="Updated Q")
+    assert detail.question == "Updated Q"
+    assert detail.answer == "Object storage"  # unchanged
+
+
+def test_update_card_deck_change(populated_db_multi_deck: Path) -> None:
+    detail = core.update_card(populated_db_multi_deck, 1, deck="DSA")
+    assert detail.deck == "DSA"
+
+
+def test_update_card_not_found(populated_db_multi_deck: Path) -> None:
+    with pytest.raises(core.CardNotFoundError):
+        core.update_card(populated_db_multi_deck, 9999, question="nope")

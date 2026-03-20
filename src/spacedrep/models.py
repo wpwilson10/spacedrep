@@ -56,7 +56,7 @@ class ReviewResult(BaseModel):
     card_id: int
     rating: str
     new_state: str
-    new_due: datetime
+    new_due: str
     stability: float
     difficulty: float
     interval_days: float
@@ -100,3 +100,46 @@ class OverallStats(BaseModel):
     review: int
     mature: int  # stability > 21 days
     avg_retention: float
+
+
+class CardSummary(BaseModel):
+    """Compact card info for list results."""
+
+    card_id: int
+    question: str  # truncated to 100 chars
+    deck: str
+    tags: str
+    state: str
+    due: str
+    suspended: bool
+
+
+class CardDetail(BaseModel):
+    """Full card data with FSRS scheduling state."""
+
+    card_id: int
+    question: str
+    answer: str
+    deck: str
+    tags: str
+    extra_fields: dict[str, str] = {}
+    source: CardSource = "manual"
+    suspended: bool = False
+    created_at: str | None = None
+    # FSRS state
+    state: str
+    due: str
+    stability: float
+    difficulty: float
+    retrievability: float
+    last_review: str | None = None
+    review_count: int = 0
+
+
+class CardListResult(BaseModel):
+    """Paginated card list response."""
+
+    cards: list[CardSummary]
+    total: int
+    limit: int
+    offset: int

@@ -9,3 +9,4 @@ dist/
 .pytest_cache/
 reviews.db
 *.apkg
+plans/

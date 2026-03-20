@@ -48,6 +48,10 @@ spacedrep deck export ./export.apkg --deck AWS
 | `db init` | Initialize the database |
 | `card next` | Get the next due card |
 | `card add <q> <a>` | Add a new card |
+| `card list` | List cards with optional filters |
+| `card get <id>` | Get full card detail by ID |
+| `card update <id>` | Update question, answer, tags, or deck |
+| `card delete <id>` | Delete a card and its review history |
 | `card suspend <id>` | Suspend a card |
 | `card unsuspend <id>` | Unsuspend a card |
 | `review submit <id> <rating>` | Submit a review |

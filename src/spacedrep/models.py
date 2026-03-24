@@ -60,6 +60,7 @@ class ReviewResult(BaseModel):
     stability: float
     difficulty: float
     interval_days: float
+    is_leech: bool = False
 
 
 class DueCount(BaseModel):
@@ -112,6 +113,7 @@ class CardSummary(BaseModel):
     state: str
     due: str
     suspended: bool
+    lapse_count: int = 0
 
 
 class CardDetail(BaseModel):
@@ -134,6 +136,7 @@ class CardDetail(BaseModel):
     retrievability: float
     last_review: str | None = None
     review_count: int = 0
+    lapse_count: int = 0
 
 
 class CardListResult(BaseModel):
@@ -143,3 +146,58 @@ class CardListResult(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class BulkCardInput(BaseModel):
+    """Input for bulk card creation."""
+
+    question: str
+    answer: str
+    deck: str = "Default"
+    tags: str = ""
+
+
+class BulkAddResult(BaseModel):
+    """Result of bulk card creation."""
+
+    created: list[int]
+    count: int
+
+
+class RatingPreview(BaseModel):
+    """Preview of what a single rating would produce."""
+
+    rating: str
+    new_state: str
+    new_due: str
+    stability: float
+    difficulty: float
+    interval_days: float
+
+
+class ReviewPreview(BaseModel):
+    """Preview of all 4 ratings for a card."""
+
+    card_id: int
+    current_state: str
+    previews: dict[str, RatingPreview]
+
+
+class OptimizeResult(BaseModel):
+    """Result of FSRS parameter optimization."""
+
+    optimized: bool
+    parameters: list[float]
+    review_count: int
+    rescheduled: int
+    message: str
+
+
+class FsrsStatus(BaseModel):
+    """Current FSRS scheduler status."""
+
+    parameters: list[float]
+    is_default: bool
+    review_count: int
+    min_reviews_needed: int
+    can_optimize: bool

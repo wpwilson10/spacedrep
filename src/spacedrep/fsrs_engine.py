@@ -3,6 +3,7 @@
 from fsrs import Card, Rating, ReviewLog, Scheduler, State
 
 _scheduler = Scheduler(desired_retention=0.9, enable_fuzzing=True)
+DEFAULT_PARAMS = tuple(_scheduler.parameters)
 
 
 def create_new_card() -> Card:
@@ -50,3 +51,36 @@ def rating_name(rating: int) -> str:
     """Convert rating int (1-4) to name."""
     names = {1: "again", 2: "hard", 3: "good", 4: "easy"}
     return names.get(rating, "unknown")
+
+
+def preview_card(card: Card) -> list[tuple[int, Card, ReviewLog]]:
+    """Preview all 4 ratings. Returns [(rating_int, updated_card, log), ...]."""
+    import copy
+
+    results: list[tuple[int, Card, ReviewLog]] = []
+    for rating_int in (1, 2, 3, 4):
+        card_copy = copy.deepcopy(card)
+        updated, log = _scheduler.review_card(card_copy, Rating(rating_int))
+        results.append((rating_int, updated, log))
+    return results
+
+
+def update_scheduler(params: list[float]) -> None:
+    """Replace the module-level scheduler with new parameters."""
+    global _scheduler
+    _scheduler = Scheduler(parameters=params, desired_retention=0.9, enable_fuzzing=True)
+
+
+def get_current_parameters() -> tuple[float, ...]:
+    """Get the current scheduler parameters."""
+    return _scheduler.parameters
+
+
+def get_scheduler() -> Scheduler:
+    """Get the current scheduler instance."""
+    return _scheduler
+
+
+def is_default_parameters() -> bool:
+    """Check if the scheduler is using default parameters."""
+    return _scheduler.parameters == DEFAULT_PARAMS

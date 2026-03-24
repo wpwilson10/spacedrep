@@ -49,6 +49,24 @@ def submit(
         raise typer.Exit(code=e.exit_code) from None
 
 
+@review_app.command("preview")
+def preview(
+    card_id: int = typer.Argument(..., help="Card ID to preview"),
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Preview what each rating would produce for a card.
+
+    Example:
+        spacedrep review preview 1
+    """
+    try:
+        result = core.preview_review(db, card_id)
+        output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
 def _parse_rating(rating: str) -> int | None:
     """Parse a rating string to int. Accepts names or numbers."""
     if rating.lower() in _RATING_MAP:

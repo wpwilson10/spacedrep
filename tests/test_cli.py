@@ -55,7 +55,7 @@ class TestDbInit:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["status"] == "ok"
-            assert data["tables_created"] == 4
+            assert data["tables_created"] == 5
 
 
 class TestCardCommands:
@@ -360,6 +360,128 @@ class TestDeck:
             data = json.loads(result.stdout)
             assert data["exported"] == 1
             assert export_path.exists()
+
+
+class TestBulkAdd:
+    def test_add_bulk_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            input_json = json.dumps(
+                [
+                    {"question": "Q1", "answer": "A1", "deck": "Test"},
+                    {"question": "Q2", "answer": "A2"},
+                ]
+            )
+            cmd = [
+                "uv",
+                "run",
+                "--project",
+                _PROJECT,
+                "spacedrep",
+                "card",
+                "add-bulk",
+                "--db",
+                str(db_path),
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, input=input_json
+            )
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["count"] == 2
+            assert len(data["created"]) == 2
+
+    def test_add_bulk_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            cmd = [
+                "uv",
+                "run",
+                "--project",
+                _PROJECT,
+                "spacedrep",
+                "card",
+                "add-bulk",
+                "--db",
+                str(db_path),
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, input="not json"
+            )
+            assert result.returncode == 2
+            data = json.loads(result.stdout)
+            assert data["error"] == "bulk_input_error"
+
+
+class TestLeech:
+    def test_leech_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "list", "--leeches"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 0  # No leeches
+
+
+class TestReviewPreview:
+    def test_preview_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["review", "preview", "1"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["card_id"] == 1
+            assert "again" in data["previews"]
+            assert "good" in data["previews"]
+            assert len(data["previews"]) == 4
+
+    def test_preview_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["review", "preview", "999"], db_path)
+            assert result.returncode == 3
+            data = json.loads(result.stdout)
+            assert data["error"] == "card_not_found"
+
+
+class TestFsrs:
+    def test_fsrs_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["fsrs", "status"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["is_default"] is True
+            assert data["review_count"] == 0
+            assert data["can_optimize"] is False
+
+    def test_fsrs_optimize_no_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["fsrs", "optimize"], db_path)
+            # Will fail with optimizer not installed (exit code 1)
+            # or succeed with "no review logs" message
+            data = json.loads(result.stdout)
+            if result.returncode == 0:
+                assert data["optimized"] is False
+            else:
+                assert data["error"] == "optimizer_not_installed"
 
 
 class TestErrorHandling:

@@ -64,6 +64,7 @@ def main(
 from spacedrep.commands.card import card_app  # noqa: E402
 from spacedrep.commands.db_cmd import db_app  # noqa: E402
 from spacedrep.commands.deck import deck_app  # noqa: E402
+from spacedrep.commands.fsrs_cmd import fsrs_app  # noqa: E402
 from spacedrep.commands.review import review_app  # noqa: E402
 from spacedrep.commands.stats import stats_app  # noqa: E402
 
@@ -72,3 +73,4 @@ app.add_typer(card_app)
 app.add_typer(review_app)
 app.add_typer(deck_app)
 app.add_typer(stats_app)
+app.add_typer(fsrs_app)

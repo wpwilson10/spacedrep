@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS fsrs_state (
     stability REAL,
     difficulty REAL,
     last_review TEXT,
-    retrievability REAL
+    retrievability REAL,
+    lapse_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS review_logs (
@@ -84,9 +85,15 @@ CREATE INDEX IF NOT EXISTS idx_fsrs_due ON fsrs_state(due);
 CREATE INDEX IF NOT EXISTS idx_fsrs_state ON fsrs_state(state);
 CREATE INDEX IF NOT EXISTS idx_review_card ON review_logs(card_id, reviewed_at);
 CREATE INDEX IF NOT EXISTS idx_review_session ON review_logs(session_id);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
-_TABLE_COUNT = 4
+_TABLE_COUNT = 5
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -101,7 +108,32 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> int:
     """Execute all CREATE TABLE/INDEX statements. Returns number of tables created."""
     conn.executescript(_SCHEMA)
+    migrate_db(conn)
     return _TABLE_COUNT
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    """Add a column to a table if it doesn't already exist. No-op if table is missing."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if not rows:
+        return  # Table doesn't exist yet; schema creation will handle it
+    columns = [r[1] for r in rows]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def migrate_db(conn: sqlite3.Connection) -> None:
+    """Run idempotent schema migrations for v0.2."""
+    _add_column_if_missing(conn, "fsrs_state", "lapse_count", "INTEGER NOT NULL DEFAULT 0")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """)
 
 
 # --- Filter helper ---
@@ -112,6 +144,7 @@ def _build_card_filter_clauses(
     deck: str | None = None,
     tags: list[str] | None = None,
     state: str | None = None,
+    leech_threshold: int | None = None,
 ) -> tuple[str, list[str | int]]:
     """Build SQL WHERE fragments for card filtering.
 
@@ -145,6 +178,10 @@ def _build_card_filter_clauses(
         elif state == "relearning":
             clauses.append("AND fs.state = ?")
             params.append(State.Relearning.value)
+
+    if leech_threshold is not None:
+        clauses.append("AND fs.lapse_count >= ?")
+        params.append(leech_threshold)
 
     return (" ".join(clauses), params)
 
@@ -295,11 +332,14 @@ def list_cards(
     deck: str | None = None,
     tags: list[str] | None = None,
     state: str | None = None,
+    leech_threshold: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> CardListResult:
     """List cards with optional filters, paginated."""
-    filter_sql, filter_params = _build_card_filter_clauses(deck=deck, tags=tags, state=state)
+    filter_sql, filter_params = _build_card_filter_clauses(
+        deck=deck, tags=tags, state=state, leech_threshold=leech_threshold
+    )
 
     count_query = f"""
         SELECT COUNT(*) AS cnt
@@ -313,7 +353,7 @@ def list_cards(
 
     data_query = f"""
         SELECT c.id AS card_id, c.question, d.name AS deck, c.tags,
-               c.suspended, fs.state, fs.last_review, fs.due
+               c.suspended, fs.state, fs.last_review, fs.due, fs.lapse_count
         FROM cards c
         JOIN fsrs_state fs ON fs.card_id = c.id
         JOIN decks d ON d.id = c.deck_id
@@ -333,6 +373,7 @@ def list_cards(
             state=fsrs_engine.state_name(State(r["state"]), r["last_review"]),
             due=r["due"],
             suspended=bool(r["suspended"]),
+            lapse_count=r["lapse_count"],
         )
         for r in rows
     ]
@@ -346,7 +387,7 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
         SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
                c.tags, c.extra_fields, c.source, c.suspended, c.created_at,
                fs.state, fs.due, fs.stability, fs.difficulty,
-               fs.last_review, fs.fsrs_card_json,
+               fs.last_review, fs.fsrs_card_json, fs.lapse_count,
                (SELECT COUNT(*) FROM review_logs rl WHERE rl.card_id = c.id) AS review_count
         FROM cards c
         JOIN fsrs_state fs ON fs.card_id = c.id
@@ -378,6 +419,7 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
         retrievability=round(retrievability, 4),
         last_review=row["last_review"],
         review_count=row["review_count"],
+        lapse_count=row["lapse_count"],
     )
 
 
@@ -440,6 +482,18 @@ def unsuspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
     """Unsuspend a card. Returns False if not found."""
     cursor = conn.execute("UPDATE cards SET suspended = 0 WHERE id = ?", (card_id,))
     return cursor.rowcount > 0
+
+
+def increment_lapse_count(conn: sqlite3.Connection, card_id: int) -> int:
+    """Increment lapse count for a card. Returns the new count."""
+    conn.execute(
+        "UPDATE fsrs_state SET lapse_count = lapse_count + 1 WHERE card_id = ?",
+        (card_id,),
+    )
+    row = conn.execute(
+        "SELECT lapse_count FROM fsrs_state WHERE card_id = ?", (card_id,)
+    ).fetchone()
+    return int(row["lapse_count"])
 
 
 def get_all_cards(conn: sqlite3.Connection, deck_id: int | None = None) -> list[CardRecord]:
@@ -665,6 +719,46 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
         mature=mature,
         avg_retention=round(float(avg_retention), 4),
     )
+
+
+# --- Config operations ---
+
+
+def get_config(conn: sqlite3.Connection, key: str) -> str | None:
+    """Get a config value by key."""
+    row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_config(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Set a config value (upsert)."""
+    conn.execute(
+        """INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')""",
+        (key, value, value),
+    )
+
+
+# --- Review log queries ---
+
+
+def get_all_review_log_jsons(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+    """Returns (card_id, fsrs_log_json) for all reviews with non-null JSON."""
+    rows = conn.execute(
+        "SELECT card_id, fsrs_log_json FROM review_logs WHERE fsrs_log_json IS NOT NULL"
+    ).fetchall()
+    return [(r["card_id"], r["fsrs_log_json"]) for r in rows]
+
+
+def get_review_logs_for_card(conn: sqlite3.Connection, card_id: int) -> list[str]:
+    """Get fsrs_log_json strings for a card, ordered by review time."""
+    rows = conn.execute(
+        """SELECT fsrs_log_json FROM review_logs
+           WHERE card_id = ? AND fsrs_log_json IS NOT NULL
+           ORDER BY reviewed_at""",
+        (card_id,),
+    ).fetchall()
+    return [r["fsrs_log_json"] for r in rows]
 
 
 # --- Helpers ---

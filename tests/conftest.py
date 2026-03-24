@@ -6,8 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from spacedrep import db
+from spacedrep import core, db
 from spacedrep.models import CardRecord
+
+
+@pytest.fixture(autouse=True)
+def _reset_fsrs_params() -> Generator[None, None, None]:  # pyright: ignore[reportUnusedFunction]
+    """Reset FSRS parameters after each test to prevent state bleed."""
+    yield
+    core.reset_params_loaded()
 
 
 @pytest.fixture

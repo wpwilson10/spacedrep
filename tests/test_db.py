@@ -12,7 +12,7 @@ def test_init_db(tmp_db: Path) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
     table_names = {r["name"] for r in tables}
-    assert table_names == {"decks", "cards", "fsrs_state", "review_logs"}
+    assert table_names == {"decks", "cards", "fsrs_state", "review_logs", "config"}
     conn.close()
 
 
@@ -284,4 +284,86 @@ def test_update_card_deck(populated_db_multi_deck: Path) -> None:
 def test_update_card_not_found(populated_db_multi_deck: Path) -> None:
     conn = db.get_connection(populated_db_multi_deck)
     assert not db.update_card(conn, 9999, question="nope")
+    conn.close()
+
+
+# --- Leech / lapse_count tests ---
+
+
+def test_increment_lapse_count(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    count = db.increment_lapse_count(conn, 1)
+    assert count == 1
+    count = db.increment_lapse_count(conn, 1)
+    assert count == 2
+    conn.close()
+
+
+def test_lapse_count_in_card_detail(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    detail = db.get_card_detail(conn, 1)
+    assert detail is not None
+    assert detail.lapse_count == 0
+
+    db.increment_lapse_count(conn, 1)
+    detail = db.get_card_detail(conn, 1)
+    assert detail is not None
+    assert detail.lapse_count == 1
+    conn.close()
+
+
+def test_lapse_count_in_list_cards(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    db.increment_lapse_count(conn, 1)
+    result = db.list_cards(conn)
+    card = next(c for c in result.cards if c.card_id == 1)
+    assert card.lapse_count == 1
+    conn.close()
+
+
+def test_list_cards_leech_filter(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    # No leeches yet
+    result = db.list_cards(conn, leech_threshold=8)
+    assert result.total == 0
+
+    # Push card 1 lapse count to 8
+    for _ in range(8):
+        db.increment_lapse_count(conn, 1)
+    result = db.list_cards(conn, leech_threshold=8)
+    assert result.total == 1
+    assert result.cards[0].card_id == 1
+    conn.close()
+
+
+# --- Config tests ---
+
+
+def test_config_get_set(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    assert db.get_config(conn, "nonexistent") is None
+
+    db.set_config(conn, "test_key", "test_value")
+    assert db.get_config(conn, "test_key") == "test_value"
+
+    # Upsert
+    db.set_config(conn, "test_key", "updated")
+    assert db.get_config(conn, "test_key") == "updated"
+    conn.close()
+
+
+# --- Review log query tests ---
+
+
+def test_get_all_review_log_jsons_empty(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    result = db.get_all_review_log_jsons(conn)
+    assert result == []
+    conn.close()
+
+
+def test_get_review_logs_for_card_empty(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    result = db.get_review_logs_for_card(conn, 999)
+    assert result == []
     conn.close()

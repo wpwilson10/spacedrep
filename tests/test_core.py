@@ -14,7 +14,7 @@ def test_init_database() -> None:
         db_path = Path(tmpdir) / "test.db"
         result = core.init_database(db_path)
         assert result["status"] == "ok"
-        assert result["tables_created"] == 4
+        assert result["tables_created"] == 5
 
 
 def test_add_card_and_get_next(tmp_db: Path) -> None:
@@ -217,3 +217,196 @@ def test_update_card_deck_change(populated_db_multi_deck: Path) -> None:
 def test_update_card_not_found(populated_db_multi_deck: Path) -> None:
     with pytest.raises(core.CardNotFoundError):
         core.update_card(populated_db_multi_deck, 9999, question="nope")
+
+
+# --- Bulk Add tests ---
+
+
+def test_add_cards_bulk(tmp_db: Path) -> None:
+    from spacedrep.models import BulkCardInput
+
+    cards = [BulkCardInput(question=f"Q{i}", answer=f"A{i}", deck="Test") for i in range(5)]
+    result = core.add_cards_bulk(tmp_db, cards)
+    assert result.count == 5
+    assert len(result.created) == 5
+    # IDs should be unique
+    assert len(set(result.created)) == 5
+
+
+def test_add_cards_bulk_empty(tmp_db: Path) -> None:
+    result = core.add_cards_bulk(tmp_db, [])
+    assert result.count == 0
+    assert result.created == []
+
+
+def test_add_cards_bulk_multi_deck(tmp_db: Path) -> None:
+    from spacedrep.models import BulkCardInput
+
+    cards = [
+        BulkCardInput(question="Q1", answer="A1", deck="AWS"),
+        BulkCardInput(question="Q2", answer="A2", deck="DSA"),
+        BulkCardInput(question="Q3", answer="A3", deck="AWS"),
+    ]
+    result = core.add_cards_bulk(tmp_db, cards)
+    assert result.count == 3
+    # Verify decks were created
+    decks = core.list_decks(tmp_db)
+    deck_names = {d.name for d in decks}
+    assert "AWS" in deck_names
+    assert "DSA" in deck_names
+
+
+# --- Leech Detection tests ---
+
+
+def _review_card_to_review_state(db_path: Path, card_id: int) -> None:
+    """Review a card with 'good' to move it to Review state."""
+    # First review moves from Learning, subsequent reviews keep it in Review
+    for _ in range(3):
+        review = ReviewInput(card_id=card_id, rating=3)  # good
+        core.submit_review(db_path, review)
+
+
+def test_lapse_increments_on_again_review(tmp_db: Path) -> None:
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    _review_card_to_review_state(tmp_db, 1)
+
+    # Verify card is in review state
+    detail = core.get_card_detail(tmp_db, 1)
+    assert detail.state == "review"
+
+    # Rate "again" — should increment lapse count
+    review = ReviewInput(card_id=1, rating=1)
+    core.submit_review(tmp_db, review)
+
+    detail = core.get_card_detail(tmp_db, 1)
+    assert detail.lapse_count == 1
+
+
+def test_no_lapse_on_learning_again(tmp_db: Path) -> None:
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+
+    # Card is in "new" (Learning) state — again should NOT increment lapse
+    review = ReviewInput(card_id=1, rating=1)
+    core.submit_review(tmp_db, review)
+
+    detail = core.get_card_detail(tmp_db, 1)
+    assert detail.lapse_count == 0
+
+
+def test_leech_auto_suspends(tmp_db: Path) -> None:
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    _review_card_to_review_state(tmp_db, 1)
+
+    # Rate "again" 8 times to trigger leech
+    is_leech_result = False
+    for _ in range(8):
+        # After each "again", the card goes to Relearning. Review it to Review first.
+        detail = core.get_card_detail(tmp_db, 1)
+        if detail.state in ("relearning", "learning"):
+            review = ReviewInput(card_id=1, rating=3)
+            core.submit_review(tmp_db, review)
+        review = ReviewInput(card_id=1, rating=1)
+        result = core.submit_review(tmp_db, review)
+        if result.is_leech:
+            is_leech_result = True
+
+    assert is_leech_result
+    detail = core.get_card_detail(tmp_db, 1)
+    assert detail.suspended
+    assert detail.lapse_count >= 8
+
+
+def test_lapse_count_in_card_detail(tmp_db: Path) -> None:
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    detail = core.get_card_detail(tmp_db, 1)
+    assert detail.lapse_count == 0
+
+
+def test_list_leeches_filter(tmp_db: Path) -> None:
+    # Add cards, no leeches yet
+    core.add_card(tmp_db, "Q1", "A1", deck="Test")
+    core.add_card(tmp_db, "Q2", "A2", deck="Test")
+
+    result = core.list_cards(tmp_db, leeches_only=True)
+    assert result.total == 0
+
+
+# --- Review Preview tests ---
+
+
+def test_preview_review(tmp_db: Path) -> None:
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    preview = core.preview_review(tmp_db, 1)
+    assert preview.card_id == 1
+    assert preview.current_state == "new"
+    assert len(preview.previews) == 4
+    assert "again" in preview.previews
+    assert "hard" in preview.previews
+    assert "good" in preview.previews
+    assert "easy" in preview.previews
+
+    # Each preview should have different intervals
+    intervals = [p.interval_days for p in preview.previews.values()]
+    assert len(set(intervals)) > 1  # at least 2 different intervals
+
+
+def test_preview_reviewed_card(tmp_db: Path) -> None:
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    review = ReviewInput(card_id=1, rating=3)
+    core.submit_review(tmp_db, review)
+
+    preview = core.preview_review(tmp_db, 1)
+    assert preview.current_state in ("learning", "review")
+    for name, p in preview.previews.items():
+        assert p.stability > 0
+        assert p.rating == name
+
+
+def test_preview_review_not_found(tmp_db: Path) -> None:
+    with pytest.raises(core.CardNotFoundError):
+        core.preview_review(tmp_db, 9999)
+
+
+# --- FSRS Status tests ---
+
+
+def test_get_fsrs_status_default(tmp_db: Path) -> None:
+    status = core.get_fsrs_status(tmp_db)
+    assert status.is_default
+    assert status.review_count == 0
+    assert status.min_reviews_needed == 512
+    assert not status.can_optimize
+
+
+def test_optimize_insufficient_reviews(tmp_db: Path) -> None:
+    # Add a card and review it once — not enough for optimization
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    review = ReviewInput(card_id=1, rating=3)
+    core.submit_review(tmp_db, review)
+
+    # Optimizer is not installed in test env, so we expect the error
+    with pytest.raises(core.OptimizerNotInstalledError):
+        core.optimize_parameters(tmp_db)
+
+
+def test_params_loaded_from_config(tmp_db: Path) -> None:
+    import json
+
+    from spacedrep import db as _db
+    from spacedrep import fsrs_engine
+
+    # Store custom params in config
+    conn = _db.get_connection(tmp_db)
+    _db.migrate_db(conn)
+    custom_params = list(fsrs_engine.DEFAULT_PARAMS)
+    custom_params[0] = 0.1234  # Modify first param
+    _db.set_config(conn, "fsrs_parameters", json.dumps(custom_params))
+    conn.commit()
+    conn.close()
+
+    # Reset and re-open — should load custom params
+    core.reset_params_loaded()
+    status = core.get_fsrs_status(tmp_db)
+    assert not status.is_default
+    assert abs(status.parameters[0] - 0.1234) < 0.001

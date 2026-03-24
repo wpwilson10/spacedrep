@@ -67,6 +67,37 @@ def add_card(
         raise typer.Exit(code=e.exit_code) from None
 
 
+@card_app.command("add-bulk")
+def add_bulk(
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Add multiple cards from JSON on stdin.
+
+    Example:
+        echo '[{"question":"Q1","answer":"A1","deck":"AWS"}]' | spacedrep card add-bulk
+    """
+    import sys as _sys
+
+    from pydantic import TypeAdapter, ValidationError
+
+    from spacedrep.models import BulkCardInput
+
+    raw = _sys.stdin.read()
+    try:
+        cards = TypeAdapter(list[BulkCardInput]).validate_json(raw)
+    except ValidationError as e:
+        err = core.BulkInputError(str(e))
+        output_error(err)
+        raise typer.Exit(code=err.exit_code) from None
+
+    try:
+        result = core.add_cards_bulk(db, cards)
+        output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
 @card_app.command("list")
 def list_cards(
     deck: str | None = typer.Option(None, help="Filter by deck name"),
@@ -74,6 +105,7 @@ def list_cards(
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"
     ),
+    leeches: bool = typer.Option(False, "--leeches", help="Show only leech cards"),
     limit: int = typer.Option(50, help="Max cards to return"),
     offset: int = typer.Option(0, help="Offset for pagination"),
     db: Path = DB_DEFAULT,
@@ -86,7 +118,13 @@ def list_cards(
     try:
         tags_list = _parse_tags(tags)
         result = core.list_cards(
-            db, deck=deck, tags=tags_list, state=state, limit=limit, offset=offset
+            db,
+            deck=deck,
+            tags=tags_list,
+            state=state,
+            leeches_only=leeches,
+            limit=limit,
+            offset=offset,
         )
         output_json(result)
     except core.SpacedrepError as e:

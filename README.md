@@ -77,7 +77,7 @@ spacedrep deck export ./export.apkg --deck AWS
 | `stats session <id>` | Session statistics |
 | `stats overall` | Overall statistics |
 | `fsrs status` | Show scheduler parameters and review count |
-| `fsrs optimize` | Optimize FSRS parameters from review history |
+| `fsrs optimize [--reschedule]` | Optimize FSRS parameters from review history |
 
 All commands accept `--db <path>` (default: `./reviews.db`).
 

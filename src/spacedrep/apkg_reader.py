@@ -114,7 +114,8 @@ def read_apkg(
                     )
 
                 note_deck_map[note["id"]] = deck_name
-                tags = note["tags"].strip() if note["tags"] else ""
+                raw_tags = note["tags"].strip() if note["tags"] else ""
+                tags = ",".join(raw_tags.split()) if raw_tags else ""
 
                 cards.append(
                     CardRecord(

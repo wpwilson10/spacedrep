@@ -79,7 +79,7 @@ class DeckInfo(BaseModel):
 class ImportResult(BaseModel):
     imported: int
     updated: int
-    deck: str
+    decks: list[str]
     fields: list[str]
     question_field: str
     answer_field: str

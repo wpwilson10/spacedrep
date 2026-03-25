@@ -456,9 +456,11 @@ def import_deck(
         imported = 0
         updated = 0
         first_deck = decks[0].name if decks else "Unknown"
+        deck_names: list[str] = []
 
         for deck_rec in decks:
             db.upsert_deck(conn, deck_rec.name, deck_rec.source_id)
+            deck_names.append(deck_rec.name)
 
         for card in cards:
             # Resolve per-card deck from the note→deck mapping
@@ -485,7 +487,7 @@ def import_deck(
         return ImportResult(
             imported=imported,
             updated=updated,
-            deck=first_deck,
+            decks=deck_names if deck_names else [first_deck],
             fields=fields_list,
             question_field=q_str,
             answer_field=a_str,

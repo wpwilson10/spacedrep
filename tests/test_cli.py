@@ -189,7 +189,7 @@ class TestCardGet:
 
             result = _run(["card", "get", "999"], db_path)
             assert result.returncode == 3
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
 
 
@@ -213,7 +213,7 @@ class TestCardDelete:
 
             result = _run(["card", "delete", "999"], db_path)
             assert result.returncode == 3
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
 
 
@@ -249,7 +249,7 @@ class TestCardUpdate:
 
             result = _run(["card", "update", "1"], db_path)
             assert result.returncode == 2
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "no_fields"
             assert "suggestion" in data
 
@@ -260,7 +260,7 @@ class TestCardUpdate:
 
             result = _run(["card", "update", "999", "--question", "nope"], db_path)
             assert result.returncode == 3
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
 
 
@@ -413,7 +413,7 @@ class TestBulkAdd:
                 cmd, capture_output=True, text=True, timeout=30, input="not json"
             )
             assert result.returncode == 2
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "bulk_input_error"
 
 
@@ -452,7 +452,7 @@ class TestReviewPreview:
 
             result = _run(["review", "preview", "999"], db_path)
             assert result.returncode == 3
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
 
 
@@ -477,10 +477,11 @@ class TestFsrs:
             result = _run(["fsrs", "optimize"], db_path)
             # Will fail with optimizer not installed (exit code 1)
             # or succeed with "no review logs" message
-            data = json.loads(result.stdout)
             if result.returncode == 0:
+                data = json.loads(result.stdout)
                 assert data["optimized"] is False
             else:
+                data = json.loads(result.stderr)
                 assert data["error"] == "optimizer_not_installed"
 
 
@@ -492,7 +493,7 @@ class TestErrorHandling:
 
             result = _run(["card", "suspend", "999"], db_path)
             assert result.returncode == 3
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
 
     def test_db_not_found(self) -> None:
@@ -501,5 +502,146 @@ class TestErrorHandling:
 
             result = _run(["card", "next"], db_path)
             assert result.returncode == 3
-            data = json.loads(result.stdout)
+            data = json.loads(result.stderr)
             assert data["error"] == "database_not_found"
+
+
+class TestQuiet:
+    def test_card_add_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "add", "Q1", "A1", "-q"], db_path)
+            assert result.returncode == 0
+            assert result.stdout.strip() == "1"
+
+    def test_card_list_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+            _add_card(db_path, "Q2", "A2")
+            _add_card(db_path, "Q3", "A3")
+
+            result = _run(["card", "list", "-q"], db_path)
+            assert result.returncode == 0
+            lines = result.stdout.strip().split("\n")
+            assert lines == ["1", "2", "3"]
+
+    def test_card_next_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "next", "-q"], db_path)
+            assert result.returncode == 0
+            assert result.stdout.strip() == "1"
+
+    def test_card_next_quiet_no_due(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "next", "-q"], db_path)
+            assert result.returncode == 0
+            assert result.stdout.strip() == ""
+
+    def test_deck_list_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", deck="AWS")
+            _add_card(db_path, "Q2", "A2", deck="DSA")
+
+            result = _run(["deck", "list", "-q"], db_path)
+            assert result.returncode == 0
+            lines = sorted(result.stdout.strip().split("\n"))
+            assert lines == ["AWS", "DSA"]
+
+    def test_review_submit_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["review", "submit", "1", "good", "-q"], db_path)
+            assert result.returncode == 0
+            assert result.stdout.strip() == "1"
+
+
+class TestDryRun:
+    def test_delete_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "delete", "1", "--dry-run"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["dry_run"] is True
+            assert data["card_id"] == 1
+            assert data["action"] == "delete"
+
+            # Card should still exist
+            result = _run(["card", "get", "1"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["card_id"] == 1
+
+    def test_suspend_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            result = _run(["card", "suspend", "1", "--dry-run"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["dry_run"] is True
+            assert data["current_suspended"] is False
+
+            # Card should NOT be suspended
+            result = _run(["card", "get", "1"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["suspended"] is False
+
+    def test_import_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+
+            # Export first to get an .apkg
+            apkg_path = Path(tmpdir) / "export.apkg"
+            result = _run(["deck", "export", str(apkg_path)], db_path)
+            assert result.returncode == 0
+
+            # Dry-run import into a fresh DB
+            db2_path = Path(tmpdir) / "test2.db"
+            _run(["db", "init"], db2_path)
+
+            result = _run(["deck", "import", str(apkg_path), "--dry-run"], db2_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["dry_run"] is True
+            assert data["imported"] == 1
+
+            # DB should still be empty
+            result = _run(["card", "list"], db2_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 0
+
+    def test_delete_dry_run_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "delete", "999", "--dry-run"], db_path)
+            assert result.returncode == 3
+            data = json.loads(result.stderr)
+            assert data["error"] == "card_not_found"

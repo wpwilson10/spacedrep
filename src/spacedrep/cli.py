@@ -32,17 +32,27 @@ def output_json(data: BaseModel | dict[str, Any] | list[Any]) -> None:
     sys.stdout.flush()
 
 
+def output_quiet(value: str | int | list[str] | list[int]) -> None:
+    """Write bare values to stdout, one per line. For pipe-friendly output."""
+    if isinstance(value, list):
+        for v in value:
+            sys.stdout.write(f"{v}\n")
+    else:
+        sys.stdout.write(f"{value}\n")
+    sys.stdout.flush()
+
+
 def output_error(err: SpacedrepError) -> None:
-    """Write error JSON to stdout."""
+    """Write error JSON to stderr."""
     error_data: dict[str, object] = {
         "error": err.error_code,
         "message": err.message,
         "suggestion": err.suggestion,
         **err.extra,
     }
-    sys.stdout.write(json.dumps(error_data, default=str))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    sys.stderr.write(json.dumps(error_data, default=str))
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
 
 @app.callback(invoke_without_command=True)

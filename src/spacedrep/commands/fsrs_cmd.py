@@ -13,6 +13,7 @@ fsrs_app = typer.Typer(name="fsrs", help="FSRS scheduler management")
 @fsrs_app.command("optimize")
 def optimize(
     reschedule: bool = typer.Option(False, help="Reschedule all cards with new params"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Compute params without persisting"),
     db: Path = DB_DEFAULT,
 ) -> None:
     """Optimize FSRS parameters from review history.
@@ -23,9 +24,10 @@ def optimize(
     Example:
         spacedrep fsrs optimize
         spacedrep fsrs optimize --reschedule
+        spacedrep fsrs optimize --dry-run
     """
     try:
-        result = core.optimize_parameters(db, reschedule=reschedule)
+        result = core.optimize_parameters(db, reschedule=reschedule, dry_run=dry_run)
         output_json(result)
     except core.SpacedrepError as e:
         output_error(e)

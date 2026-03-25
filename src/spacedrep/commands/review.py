@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from spacedrep import core
-from spacedrep.cli import DB_DEFAULT, output_error, output_json
+from spacedrep.cli import DB_DEFAULT, output_error, output_json, output_quiet
 from spacedrep.models import ReviewInput
 
 review_app = typer.Typer(name="review", help="Review operations")
@@ -20,6 +20,7 @@ def submit(
     answer: str | None = typer.Option(None, "--answer", help="User's answer text"),
     feedback: str | None = typer.Option(None, "--feedback", help="Feedback text"),
     session: str | None = typer.Option(None, "--session", help="Session ID"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Output bare card ID"),
     db: Path = DB_DEFAULT,
 ) -> None:
     """Submit a review for a card.
@@ -27,6 +28,7 @@ def submit(
     Example:
         spacedrep review submit 42 good --answer "CAP means pick 2 of 3"
         spacedrep review submit 42 3 --session session-2026-03-18
+        spacedrep review submit 42 good -q
     """
     rating_int = _parse_rating(rating)
     if rating_int is None:
@@ -43,7 +45,10 @@ def submit(
 
     try:
         result = core.submit_review(db, review_input)
-        output_json(result)
+        if quiet:
+            output_quiet(result.card_id)
+        else:
+            output_json(result)
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None

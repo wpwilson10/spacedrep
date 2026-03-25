@@ -81,13 +81,33 @@ spacedrep deck export ./export.apkg --deck AWS
 
 All commands accept `--db <path>` (default: `./reviews.db`).
 
+### Global Flags
+
+| Flag | Available on | Behavior |
+|------|-------------|----------|
+| `--quiet` / `-q` | card, deck, review submit | Output bare values (one per line) for piping |
+| `--dry-run` | card delete/suspend/unsuspend, deck import, fsrs optimize | Preview what would happen without making changes |
+
+```bash
+# Pipe card IDs
+spacedrep card list -q | xargs -I{} spacedrep card get {}
+
+# Preview a delete
+spacedrep card delete 42 --dry-run
+
+# Preview an import
+spacedrep deck import deck.apkg --dry-run
+```
+
 ## Agent-First Design
 
-- **JSON to stdout** — every command outputs structured JSON
+- **JSON to stdout, errors to stderr** — stdout is the API contract, stderr has structured error JSON
 - **Meaningful exit codes** — 0=success, 2=usage error, 3=not found
 - **Idempotent** — imports dedup, adds are safe to retry
 - **Non-interactive** — no prompts, no confirmation dialogs
 - **Self-documenting** — `--help` on every command with examples
+- **`--quiet` mode** — bare values for piping into `xargs` or `while read`
+- **`--dry-run`** — preview destructive operations without side effects
 
 ## How It Works
 

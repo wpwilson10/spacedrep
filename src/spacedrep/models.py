@@ -83,6 +83,7 @@ class ImportResult(BaseModel):
     fields: list[str]
     question_field: str
     answer_field: str
+    dry_run: bool = False
 
 
 class SessionStats(BaseModel):

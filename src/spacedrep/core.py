@@ -377,9 +377,23 @@ def preview_review(db_path: Path, card_id: int) -> ReviewPreview:
         )
 
 
-def delete_card(db_path: Path, card_id: int) -> dict[str, int | bool]:
+def delete_card(
+    db_path: Path, card_id: int, *, dry_run: bool = False
+) -> dict[str, int | bool | str]:
     """Delete a card. Raises CardNotFoundError if not found."""
     with _open_db(db_path) as conn:
+        if dry_run:
+            detail = db.get_card_detail(conn, card_id)
+            if detail is None:
+                raise CardNotFoundError(card_id)
+            return {
+                "card_id": card_id,
+                "action": "delete",
+                "dry_run": True,
+                "question": detail.question,
+                "deck": detail.deck,
+                "review_count": detail.review_count,
+            }
         result = db.delete_card(conn, card_id)
         if not result:
             raise CardNotFoundError(card_id)
@@ -415,9 +429,21 @@ def update_card(
         return detail
 
 
-def suspend_card(db_path: Path, card_id: int) -> bool:
+def suspend_card(
+    db_path: Path, card_id: int, *, dry_run: bool = False
+) -> bool | dict[str, int | bool]:
     """Suspend a card. Returns False if not found."""
     with _open_db(db_path) as conn:
+        if dry_run:
+            detail = db.get_card_detail(conn, card_id)
+            if detail is None:
+                raise CardNotFoundError(card_id)
+            return {
+                "card_id": card_id,
+                "suspended": True,
+                "dry_run": True,
+                "current_suspended": detail.suspended,
+            }
         result = db.suspend_card(conn, card_id)
         if not result:
             raise CardNotFoundError(card_id)
@@ -425,9 +451,21 @@ def suspend_card(db_path: Path, card_id: int) -> bool:
         return result
 
 
-def unsuspend_card(db_path: Path, card_id: int) -> bool:
+def unsuspend_card(
+    db_path: Path, card_id: int, *, dry_run: bool = False
+) -> bool | dict[str, int | bool]:
     """Unsuspend a card. Returns False if not found."""
     with _open_db(db_path) as conn:
+        if dry_run:
+            detail = db.get_card_detail(conn, card_id)
+            if detail is None:
+                raise CardNotFoundError(card_id)
+            return {
+                "card_id": card_id,
+                "suspended": False,
+                "dry_run": True,
+                "current_suspended": detail.suspended,
+            }
         result = db.unsuspend_card(conn, card_id)
         if not result:
             raise CardNotFoundError(card_id)
@@ -440,6 +478,8 @@ def import_deck(
     apkg_path: Path,
     question_field: str | None = None,
     answer_field: str | None = None,
+    *,
+    dry_run: bool = False,
 ) -> ImportResult:
     """Import an .apkg file into the database."""
     from spacedrep.apkg_reader import read_apkg
@@ -452,15 +492,48 @@ def import_deck(
     except Exception as e:
         raise ApkgImportError(f"Failed to read .apkg: {e}") from e
 
+    fields_val = field_info.get("fields", [])
+    fields_list: list[str] = fields_val if isinstance(fields_val, list) else []
+    q_val = field_info.get("question_field", "")
+    q_str: str = q_val if isinstance(q_val, str) else ""
+    a_val = field_info.get("answer_field", "")
+    a_str: str = a_val if isinstance(a_val, str) else ""
+    deck_names = [d.name for d in decks]
+    first_deck = decks[0].name if decks else "Unknown"
+
+    if dry_run:
+        # Count how many would be new vs updated without writing
+        with _open_db(db_path) as conn:
+            would_import = 0
+            would_update = 0
+            for card in cards:
+                if card.source_note_id is not None:
+                    existing = conn.execute(
+                        "SELECT 1 FROM cards WHERE source_note_id = ?",
+                        (card.source_note_id,),
+                    ).fetchone()
+                    if existing:
+                        would_update += 1
+                    else:
+                        would_import += 1
+                else:
+                    would_import += 1
+            return ImportResult(
+                imported=would_import,
+                updated=would_update,
+                decks=deck_names if deck_names else [first_deck],
+                fields=fields_list,
+                question_field=q_str,
+                answer_field=a_str,
+                dry_run=True,
+            )
+
     with _open_db(db_path) as conn:
         imported = 0
         updated = 0
-        first_deck = decks[0].name if decks else "Unknown"
-        deck_names: list[str] = []
 
         for deck_rec in decks:
             db.upsert_deck(conn, deck_rec.name, deck_rec.source_id)
-            deck_names.append(deck_rec.name)
 
         for card in cards:
             # Resolve per-card deck from the note→deck mapping
@@ -478,12 +551,6 @@ def import_deck(
                 imported += 1
 
         conn.commit()
-        fields_val = field_info.get("fields", [])
-        fields_list: list[str] = fields_val if isinstance(fields_val, list) else []
-        q_val = field_info.get("question_field", "")
-        q_str: str = q_val if isinstance(q_val, str) else ""
-        a_val = field_info.get("answer_field", "")
-        a_str: str = a_val if isinstance(a_val, str) else ""
         return ImportResult(
             imported=imported,
             updated=updated,
@@ -565,7 +632,9 @@ def _reschedule_all_cards(conn: sqlite3.Connection) -> int:
     return count
 
 
-def optimize_parameters(db_path: Path, *, reschedule: bool = False) -> OptimizeResult:
+def optimize_parameters(
+    db_path: Path, *, reschedule: bool = False, dry_run: bool = False
+) -> OptimizeResult:
     """Optimize FSRS parameters from review history."""
     import json as _json
 
@@ -595,6 +664,16 @@ def optimize_parameters(db_path: Path, *, reschedule: bool = False) -> OptimizeR
         params = optimizer.compute_optimal_parameters()
 
         is_default = tuple(params) == fsrs_engine.DEFAULT_PARAMS
+
+        if dry_run:
+            cards_with_reviews = len({cid for cid, _ in raw_logs})
+            return OptimizeResult(
+                optimized=not is_default,
+                parameters=params,
+                review_count=len(review_logs),
+                rescheduled=cards_with_reviews if reschedule and not is_default else 0,
+                message="Dry run: no changes applied",
+            )
 
         if not is_default:
             db.set_config(conn, "fsrs_parameters", _json.dumps(params))

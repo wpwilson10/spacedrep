@@ -14,10 +14,12 @@ dependencies = [
 
 [project.scripts]
 spacedrep = "spacedrep.cli:app"
+spacedrep-mcp = "spacedrep.mcp_server:main"
 
 [project.optional-dependencies]
+mcp = ["mcp>=1.0"]
 optimizer = ["fsrs[optimizer]"]
-dev = ["pytest>=8.0", "pyright>=1.1", "ruff>=0.11", "pre-commit>=4.0"]
+dev = ["pytest>=8.0", "pyright>=1.1", "ruff>=0.11", "pre-commit>=4.0", "mcp>=1.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -27,6 +29,12 @@ build-backend = "hatchling.build"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
+
+[[tool.pyright.executionEnvironments]]
+root = "tests/test_mcp_server.py"
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportAttributeAccessIssue = false
 
 [tool.ruff]
 target-version = "py312"

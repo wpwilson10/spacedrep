@@ -118,6 +118,69 @@ spacedrep deck import deck.apkg --dry-run
 - **SQLite storage** — single file, SQL-queryable review history
 - **.apkg compatible** — import from and export to Anki
 
+## MCP Server
+
+An MCP server exposes all spacedrep operations as tools for AI agents (Claude Code, Claude Desktop, etc.) without shelling out to the CLI.
+
+### Install
+
+```bash
+# From source with MCP support
+uv sync --extra mcp
+
+# Or via pip
+pip install spacedrep[mcp]
+```
+
+### Configure
+
+**Claude Code:**
+```bash
+claude mcp add spacedrep -e SPACEDREP_DB=/path/to/reviews.db -- uv run --directory /path/to/spacedrep spacedrep-mcp
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "spacedrep": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/spacedrep", "spacedrep-mcp"],
+      "env": {
+        "SPACEDREP_DB": "/path/to/reviews.db"
+      }
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `init_database` | Initialize the database |
+| `add_card` | Add a single flashcard |
+| `add_cards_bulk` | Add multiple cards from JSON string |
+| `get_next_card` | Get next due card for review |
+| `list_cards` | List/filter cards with pagination |
+| `get_card` | Get full card detail by ID |
+| `update_card` | Update card fields |
+| `delete_card` | Delete a card |
+| `suspend_card` | Suspend a card from reviews |
+| `unsuspend_card` | Unsuspend a card |
+| `submit_review` | Submit a review rating (1-4) |
+| `preview_review` | Preview all 4 rating outcomes |
+| `list_decks` | List all decks |
+| `import_deck` | Import .apkg file |
+| `export_deck` | Export to .apkg file |
+| `get_due_count` | Due card counts by state |
+| `get_session_stats` | Session review statistics |
+| `get_overall_stats` | Overall database statistics |
+| `get_fsrs_status` | FSRS scheduler status |
+| `optimize_fsrs` | Optimize FSRS parameters |
+
+All tools use flat primitive parameters (string, int, bool) for maximum client compatibility. Set `SPACEDREP_DB` to configure the database path (default: `./reviews.db`).
+
 ## Development
 
 ```bash

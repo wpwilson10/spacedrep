@@ -30,6 +30,7 @@ from spacedrep.mcp_server import (
     init_database,
     list_cards,
     list_decks,
+    optimize_fsrs,
     preview_review,
     submit_review,
     suspend_card,
@@ -252,12 +253,14 @@ class TestPreviewReview:
 class TestListDecks:
     def test_empty(self, tmp_db: Path) -> None:
         result = list_decks()
-        assert result["items"] == []
+        assert result["decks"] == []
+        assert result["count"] == 0
 
     def test_with_deck(self, card_id: int, tmp_db: Path) -> None:
         result = list_decks()
-        assert len(result["items"]) == 1
-        assert result["items"][0]["name"] == "AWS"
+        assert len(result["decks"]) == 1
+        assert result["decks"][0]["name"] == "AWS"
+        assert result["count"] == 1
 
 
 class TestImportDeck:
@@ -414,6 +417,39 @@ class TestGetFsrsStatus:
         assert "parameters" in result
 
 
+class TestOptimizeFsrs:
+    def test_no_reviews(self, tmp_db: Path) -> None:
+        """With no reviews, optimizer returns optimized=False."""
+        result = optimize_fsrs()
+        assert result["review_count"] == 0
+        assert result["optimized"] is False
+
+    def test_with_reviews(self, card_id: int, tmp_db: Path) -> None:
+        """With a review, optimizer runs and returns review count."""
+        submit_review(card_id, rating=3)
+        result = optimize_fsrs()
+        assert result["review_count"] >= 1
+        assert "parameters" in result
+
+    def test_dry_run(self, card_id: int, tmp_db: Path) -> None:
+        submit_review(card_id, rating=3)
+        result = optimize_fsrs(dry_run=True)
+        assert "Dry run" in result["message"]
+
+    def test_optimizer_not_installed_raises_tool_error(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OptimizerNotInstalledError should be wrapped as ToolError."""
+
+        def _raise(*args: object, **kwargs: object) -> None:
+            raise core.OptimizerNotInstalledError()
+
+        monkeypatch.setattr(core, "optimize_parameters", _raise)
+        with pytest.raises(ToolError) as exc_info:
+            optimize_fsrs()
+        assert "optimizer_not_installed" in str(exc_info.value)
+
+
 # ---------------------------------------------------------------------------
 # Schema validation (regression guard for Claude Code compatibility)
 # ---------------------------------------------------------------------------
@@ -476,3 +512,28 @@ class TestSchemaValidation:
         for name in _get_tools():
             full = f"{prefix}{name}"
             assert len(full) <= 64, f"Tool name '{full}' is {len(full)} chars (max 64)"
+
+    def test_key_params_have_descriptions(self) -> None:
+        """Parameters with non-obvious semantics should have descriptions to help agents."""
+        tools = _get_tools()
+
+        def _desc(tool_name: str, param_name: str) -> str | None:
+            tool = tools[tool_name]
+            props = tool.parameters["properties"]
+            assert isinstance(props, dict)
+            schema = props[param_name]
+            assert isinstance(schema, dict)
+            return schema.get("description")
+
+        # Rating semantics are critical for correct agent behavior
+        assert _desc("submit_review", "rating") is not None
+        # Tags format must be documented
+        assert _desc("add_card", "tags") is not None
+        # State filter values must be documented
+        assert _desc("get_next_card", "state") is not None
+        # Bulk JSON format must be documented
+        assert _desc("add_cards_bulk", "cards_json") is not None
+        # dry_run should be described
+        assert _desc("delete_card", "dry_run") is not None
+        # File paths should be described
+        assert _desc("import_deck", "apkg_path") is not None

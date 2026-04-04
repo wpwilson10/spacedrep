@@ -8,11 +8,11 @@ from __future__ import annotations
 import json as _json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from spacedrep import core
 from spacedrep.models import BulkCardInput, ReviewInput
@@ -69,12 +69,6 @@ def _serialize(data: BaseModel | dict[str, object]) -> dict[str, object]:
     if isinstance(data, BaseModel):
         return data.model_dump()
     return data
-
-
-def _serialize_list(data: list[BaseModel]) -> dict[str, object]:
-    """Serialize a list of Pydantic models to a JSON-safe dict."""
-    items: list[dict[str, object]] = [d.model_dump() for d in data]
-    return {"items": items}
 
 
 def _or_none(val: str) -> str | None:
@@ -134,8 +128,8 @@ def _validate_file_path(path_str: str, *, must_exist: bool = False) -> Path:
 def add_card(
     question: str,
     answer: str,
-    deck: str = "Default",
-    tags: str = "",
+    deck: Annotated[str, Field(description="Deck name (created if new)")] = "Default",
+    tags: Annotated[str, Field(description="Comma-separated tag names")] = "",
 ) -> dict[str, Any]:
     """Add a new flashcard. Use when the user wants to create a single card.
     Tags are comma-separated. Returns the new card ID and deck name."""
@@ -144,7 +138,14 @@ def add_card(
 
 @mcp.tool()
 @_handle_errors
-def add_cards_bulk(cards_json: str) -> dict[str, Any]:
+def add_cards_bulk(
+    cards_json: Annotated[
+        str,
+        Field(
+            description='JSON array: [{"question":"...","answer":"...","deck":"...","tags":"..."}]'
+        ),
+    ],
+) -> dict[str, Any]:
     """Add multiple flashcards in one transaction. Pass a JSON array string of
     objects with keys: question, answer, deck (optional), tags (optional).
     Example: '[{"question":"Q1","answer":"A1","deck":"AWS"}]'"""
@@ -160,9 +161,9 @@ def add_cards_bulk(cards_json: str) -> dict[str, Any]:
 @mcp.tool()
 @_handle_errors
 def get_next_card(
-    deck: str = "",
-    tags: str = "",
-    state: str = "",
+    deck: Annotated[str, Field(description="Deck name to filter by")] = "",
+    tags: Annotated[str, Field(description="Comma-separated tag names to filter by")] = "",
+    state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
 ) -> dict[str, Any]:
     """Get the next flashcard due for review. Use at the start of a study session.
     Filter by deck name, comma-separated tags, or state (new/learning/review/relearning).
@@ -182,12 +183,12 @@ def get_next_card(
 @mcp.tool()
 @_handle_errors
 def list_cards(
-    deck: str = "",
-    tags: str = "",
-    state: str = "",
-    leeches_only: bool = False,
-    limit: int = 50,
-    offset: int = 0,
+    deck: Annotated[str, Field(description="Deck name to filter by")] = "",
+    tags: Annotated[str, Field(description="Comma-separated tag names to filter by")] = "",
+    state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
+    leeches_only: Annotated[bool, Field(description="Only show leech cards (8+ lapses)")] = False,
+    limit: Annotated[int, Field(description="Max cards to return")] = 50,
+    offset: Annotated[int, Field(description="Skip this many cards (for pagination)")] = 0,
 ) -> dict[str, Any]:
     """List flashcards with optional filters and pagination. Use to browse or
     search cards. Filter by deck, comma-separated tags, state, or leeches only."""
@@ -216,10 +217,10 @@ def get_card(card_id: int) -> dict[str, Any]:
 @_handle_errors
 def update_card(
     card_id: int,
-    question: str = "",
-    answer: str = "",
-    tags: str = "",
-    deck: str = "",
+    question: Annotated[str, Field(description="New question text")] = "",
+    answer: Annotated[str, Field(description="New answer text")] = "",
+    tags: Annotated[str, Field(description="New comma-separated tags")] = "",
+    deck: Annotated[str, Field(description="Move card to this deck")] = "",
 ) -> dict[str, Any]:
     """Update a flashcard's question, answer, tags, or deck. Only non-empty
     fields are changed. Provide at least one field to update."""
@@ -234,7 +235,10 @@ def update_card(
 
 @mcp.tool()
 @_handle_errors
-def delete_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
+def delete_card(
+    card_id: int,
+    dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
+) -> dict[str, Any]:
     """Permanently delete a flashcard and its review history. Use dry_run=true
     to preview what would be deleted without making changes."""
     return core.delete_card(_db_path(), card_id, dry_run=dry_run)
@@ -242,7 +246,10 @@ def delete_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 @_handle_errors
-def suspend_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
+def suspend_card(
+    card_id: int,
+    dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
+) -> dict[str, Any]:
     """Suspend a card to exclude it from reviews. Use for cards that are too
     hard or need revision. Use dry_run=true to preview."""
     return core.suspend_card(_db_path(), card_id, dry_run=dry_run)
@@ -250,7 +257,10 @@ def suspend_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 @_handle_errors
-def unsuspend_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
+def unsuspend_card(
+    card_id: int,
+    dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
+) -> dict[str, Any]:
     """Unsuspend a card to include it in reviews again. Use dry_run=true to preview."""
     return core.unsuspend_card(_db_path(), card_id, dry_run=dry_run)
 
@@ -264,10 +274,10 @@ def unsuspend_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
 @_handle_errors
 def submit_review(
     card_id: int,
-    rating: int,
-    answer: str = "",
-    feedback: str = "",
-    session_id: str = "",
+    rating: Annotated[int, Field(description="1=again, 2=hard, 3=good, 4=easy")],
+    answer: Annotated[str, Field(description="User's answer text")] = "",
+    feedback: Annotated[str, Field(description="Feedback on the answer")] = "",
+    session_id: Annotated[str, Field(description="Session ID for grouping reviews")] = "",
 ) -> dict[str, Any]:
     """Submit a review rating for a flashcard. Rating: 1=again, 2=hard, 3=good,
     4=easy. Optionally include the user's answer text and a session ID for
@@ -299,16 +309,17 @@ def preview_review(card_id: int) -> dict[str, Any]:
 @_handle_errors
 def list_decks() -> dict[str, object]:
     """List all decks with their card counts and due counts."""
-    return _serialize_list(list(core.list_decks(_db_path())))
+    decks = core.list_decks(_db_path())
+    return {"decks": [d.model_dump() for d in decks], "count": len(decks)}
 
 
 @mcp.tool()
 @_handle_errors
 def import_deck(
-    apkg_path: str,
-    question_field: str = "",
-    answer_field: str = "",
-    dry_run: bool = False,
+    apkg_path: Annotated[str, Field(description="Absolute path to .apkg file on disk")],
+    question_field: Annotated[str, Field(description="Question field name if non-standard")] = "",
+    answer_field: Annotated[str, Field(description="Answer field name if non-standard")] = "",
+    dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
 ) -> dict[str, Any]:
     """Import an Anki .apkg deck file. Specify the absolute file path on disk.
     Optionally set question_field and answer_field names if the deck uses
@@ -327,7 +338,10 @@ def import_deck(
 
 @mcp.tool()
 @_handle_errors
-def export_deck(output_path: str, deck: str = "") -> dict[str, Any]:
+def export_deck(
+    output_path: Annotated[str, Field(description="Absolute path for the output .apkg file")],
+    deck: Annotated[str, Field(description="Deck name to export (all if empty)")] = "",
+) -> dict[str, Any]:
     """Export flashcards to an Anki .apkg file. Optionally filter by deck name.
     If no deck specified, exports all cards."""
     validated = _validate_file_path(output_path)
@@ -350,7 +364,9 @@ def get_due_count() -> dict[str, Any]:
 
 @mcp.tool()
 @_handle_errors
-def get_session_stats(session_id: str) -> dict[str, Any]:
+def get_session_stats(
+    session_id: Annotated[str, Field(description="Session ID from submit_review")],
+) -> dict[str, Any]:
     """Get statistics for a specific review session: cards reviewed, rating
     breakdown, and accuracy."""
     return _serialize(core.get_session_stats(_db_path(), session_id))
@@ -387,7 +403,12 @@ def get_fsrs_status() -> dict[str, Any]:
 
 @mcp.tool()
 @_handle_errors
-def optimize_fsrs(reschedule: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def optimize_fsrs(
+    reschedule: Annotated[
+        bool, Field(description="Update all card schedules with new parameters")
+    ] = False,
+    dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
+) -> dict[str, Any]:
     """Optimize FSRS scheduling parameters from review history. Requires 512+
     reviews. Set reschedule=true to update all card schedules with new parameters.
     Requires the optimizer extra (pip install spacedrep[optimizer]).

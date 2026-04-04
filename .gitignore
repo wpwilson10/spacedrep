@@ -10,3 +10,7 @@ dist/
 reviews.db
 *.apkg
 plans/
+designs/
+.claude/
+.mcp.json
+sqlite_mcp_server.db

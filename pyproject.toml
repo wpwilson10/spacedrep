@@ -1,9 +1,23 @@
 [project]
 name = "spacedrep"
-version = "0.2.0"
+version = "0.1.0"
 requires-python = ">=3.12"
 description = "Agent-first flashcard CLI with FSRS scheduling and .apkg support"
 license = "MIT"
+readme = "README.md"
+authors = [{ name = "wpwilson10", email = "wpwilson10@gmail.com" }]
+keywords = ["flashcards", "spaced-repetition", "fsrs", "anki", "mcp", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Education",
+]
 dependencies = [
     "typer>=0.15",
     "fsrs>=6.3,<7",
@@ -20,6 +34,11 @@ spacedrep-mcp = "spacedrep.mcp_server:main"
 mcp = ["mcp>=1.0"]
 optimizer = ["fsrs[optimizer]"]
 dev = ["pytest>=8.0", "pyright>=1.1", "ruff>=0.11", "pre-commit>=4.0", "mcp>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/wpwilson10/spacedrep"
+Repository = "https://github.com/wpwilson10/spacedrep"
+Issues = "https://github.com/wpwilson10/spacedrep/issues"
 
 [build-system]
 requires = ["hatchling"]

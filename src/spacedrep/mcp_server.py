@@ -19,11 +19,24 @@ from spacedrep.models import BulkCardInput, ReviewInput
 
 mcp = FastMCP("spacedrep")
 
-DB_PATH = Path(os.environ.get("SPACEDREP_DB", "./reviews.db"))
+_DB_DEFAULT = "./reviews.db"
+
+
+def _db_path() -> Path:
+    """Resolve database path from env at call time (not import time).
+
+    This matters because the MCP server is long-running — the env var or
+    working directory could change between tool invocations.
+    """
+    return Path(os.environ.get("SPACEDREP_DB", _DB_DEFAULT))
 
 
 def _handle_errors(fn: Any) -> Any:  # noqa: ANN401
-    """Wrap a tool function to catch SpacedrepError and raise ToolError."""
+    """Wrap a tool function to catch errors and raise ToolError with structured JSON.
+
+    SpacedrepError → structured JSON with error code, message, suggestion.
+    Any other exception → generic internal error so agents never see raw tracebacks.
+    """
     import functools
 
     @functools.wraps(fn)
@@ -36,6 +49,15 @@ def _handle_errors(fn: Any) -> Any:  # noqa: ANN401
                 "message": e.message,
                 "suggestion": e.suggestion,
                 **e.extra,
+            }
+            raise ToolError(_json.dumps(error_data, default=str)) from e
+        except ToolError:
+            raise
+        except Exception as e:
+            error_data = {
+                "error": "internal_error",
+                "message": str(e),
+                "suggestion": "This is an unexpected error. Check the database and try again.",
             }
             raise ToolError(_json.dumps(error_data, default=str)) from e
 
@@ -67,6 +89,41 @@ def _parse_tags(tags: str) -> list[str] | None:
     return [t.strip() for t in tags.split(",") if t.strip()]
 
 
+def _validate_file_path(path_str: str, *, must_exist: bool = False) -> Path:
+    """Resolve and validate a file path from agent input.
+
+    Defends against path traversal: resolves to absolute, rejects paths
+    containing '..' components or targeting sensitive dotfile directories.
+    """
+    resolved = Path(path_str).resolve()
+
+    # Block paths with '..' that could escape intended directories
+    if ".." in Path(path_str).parts:
+        raise core.SpacedrepError(
+            error_code="invalid_path",
+            message=f"Path must not contain '..': {path_str}",
+            suggestion="Use an absolute path or a simple relative path.",
+        )
+
+    # Block sensitive dotfile directories
+    _sensitive = {".ssh", ".gnupg", ".aws", ".config"}
+    if any(part in _sensitive for part in resolved.parts):
+        raise core.SpacedrepError(
+            error_code="invalid_path",
+            message=f"Path targets a sensitive directory: {path_str}",
+            suggestion="Use a path outside of sensitive dotfile directories.",
+        )
+
+    if must_exist and not resolved.exists():
+        raise core.SpacedrepError(
+            error_code="file_not_found",
+            message=f"File not found: {resolved}",
+            suggestion="Check the file path and try again.",
+        )
+
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # Card tools
 # ---------------------------------------------------------------------------
@@ -82,7 +139,7 @@ def add_card(
 ) -> dict[str, Any]:
     """Add a new flashcard. Use when the user wants to create a single card.
     Tags are comma-separated. Returns the new card ID and deck name."""
-    return core.add_card(DB_PATH, question, answer, deck=deck, tags=tags)
+    return core.add_card(_db_path(), question, answer, deck=deck, tags=tags)
 
 
 @mcp.tool()
@@ -97,7 +154,7 @@ def add_cards_bulk(cards_json: str) -> dict[str, Any]:
         cards = TypeAdapter(list[BulkCardInput]).validate_json(cards_json)
     except ValidationError as e:
         raise core.BulkInputError(str(e)) from e
-    return _serialize(core.add_cards_bulk(DB_PATH, cards))
+    return _serialize(core.add_cards_bulk(_db_path(), cards))
 
 
 @mcp.tool()
@@ -111,13 +168,13 @@ def get_next_card(
     Filter by deck name, comma-separated tags, or state (new/learning/review/relearning).
     Returns card details or a message if no cards are due."""
     result = core.get_next_card(
-        DB_PATH,
+        _db_path(),
         deck=_or_none(deck),
         tags=_parse_tags(tags),
         state=_or_none(state),
     )
     if result is None:
-        next_due = core.get_next_due_time(DB_PATH)
+        next_due = core.get_next_due_time(_db_path())
         return {"card_id": None, "message": "No cards due", "next_due": next_due}
     return _serialize(result)
 
@@ -136,7 +193,7 @@ def list_cards(
     search cards. Filter by deck, comma-separated tags, state, or leeches only."""
     return _serialize(
         core.list_cards(
-            DB_PATH,
+            _db_path(),
             deck=_or_none(deck),
             tags=_parse_tags(tags),
             state=_or_none(state),
@@ -152,7 +209,7 @@ def list_cards(
 def get_card(card_id: int) -> dict[str, Any]:
     """Get full detail for a single flashcard by ID. Use to inspect a card's
     question, answer, FSRS scheduling state, and review history."""
-    return _serialize(core.get_card_detail(DB_PATH, card_id))
+    return _serialize(core.get_card_detail(_db_path(), card_id))
 
 
 @mcp.tool()
@@ -172,7 +229,7 @@ def update_card(
     d = _or_none(deck)
     if q is None and a is None and t is None and d is None:
         raise core.NoFieldsProvidedError()
-    return _serialize(core.update_card(DB_PATH, card_id, question=q, answer=a, tags=t, deck=d))
+    return _serialize(core.update_card(_db_path(), card_id, question=q, answer=a, tags=t, deck=d))
 
 
 @mcp.tool()
@@ -180,7 +237,7 @@ def update_card(
 def delete_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
     """Permanently delete a flashcard and its review history. Use dry_run=true
     to preview what would be deleted without making changes."""
-    return core.delete_card(DB_PATH, card_id, dry_run=dry_run)
+    return core.delete_card(_db_path(), card_id, dry_run=dry_run)
 
 
 @mcp.tool()
@@ -188,20 +245,14 @@ def delete_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
 def suspend_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
     """Suspend a card to exclude it from reviews. Use for cards that are too
     hard or need revision. Use dry_run=true to preview."""
-    result = core.suspend_card(DB_PATH, card_id, dry_run=dry_run)
-    if isinstance(result, bool):
-        return {"card_id": card_id, "suspended": True}
-    return result
+    return core.suspend_card(_db_path(), card_id, dry_run=dry_run)
 
 
 @mcp.tool()
 @_handle_errors
 def unsuspend_card(card_id: int, dry_run: bool = False) -> dict[str, Any]:
     """Unsuspend a card to include it in reviews again. Use dry_run=true to preview."""
-    result = core.unsuspend_card(DB_PATH, card_id, dry_run=dry_run)
-    if isinstance(result, bool):
-        return {"card_id": card_id, "suspended": False}
-    return result
+    return core.unsuspend_card(_db_path(), card_id, dry_run=dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +279,7 @@ def submit_review(
         feedback=_or_none(feedback),
         session_id=_or_none(session_id),
     )
-    return _serialize(core.submit_review(DB_PATH, review_input))
+    return _serialize(core.submit_review(_db_path(), review_input))
 
 
 @mcp.tool()
@@ -236,7 +287,7 @@ def submit_review(
 def preview_review(card_id: int) -> dict[str, Any]:
     """Preview what each of the 4 ratings (again/hard/good/easy) would produce
     for a card. Use before submitting a review to see scheduling outcomes."""
-    return _serialize(core.preview_review(DB_PATH, card_id))
+    return _serialize(core.preview_review(_db_path(), card_id))
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +299,7 @@ def preview_review(card_id: int) -> dict[str, Any]:
 @_handle_errors
 def list_decks() -> dict[str, object]:
     """List all decks with their card counts and due counts."""
-    return _serialize_list(list(core.list_decks(DB_PATH)))
+    return _serialize_list(list(core.list_decks(_db_path())))
 
 
 @mcp.tool()
@@ -259,13 +310,14 @@ def import_deck(
     answer_field: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Import an Anki .apkg deck file. Specify the file path on disk.
+    """Import an Anki .apkg deck file. Specify the absolute file path on disk.
     Optionally set question_field and answer_field names if the deck uses
     non-standard field names. Use dry_run=true to preview without writing."""
+    validated = _validate_file_path(apkg_path, must_exist=True)
     return _serialize(
         core.import_deck(
-            DB_PATH,
-            Path(apkg_path),
+            _db_path(),
+            validated,
             _or_none(question_field),
             _or_none(answer_field),
             dry_run=dry_run,
@@ -278,8 +330,9 @@ def import_deck(
 def export_deck(output_path: str, deck: str = "") -> dict[str, Any]:
     """Export flashcards to an Anki .apkg file. Optionally filter by deck name.
     If no deck specified, exports all cards."""
-    count = core.export_deck(DB_PATH, Path(output_path), _or_none(deck))
-    return {"exported": count, "file": output_path}
+    validated = _validate_file_path(output_path)
+    count = core.export_deck(_db_path(), validated, _or_none(deck))
+    return {"exported": count, "file": str(validated)}
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +345,7 @@ def export_deck(output_path: str, deck: str = "") -> dict[str, Any]:
 def get_due_count() -> dict[str, Any]:
     """Get count of cards currently due for review, broken down by state
     (new/learning/review). Use to check study workload."""
-    return _serialize(core.get_due_count(DB_PATH))
+    return _serialize(core.get_due_count(_db_path()))
 
 
 @mcp.tool()
@@ -300,7 +353,7 @@ def get_due_count() -> dict[str, Any]:
 def get_session_stats(session_id: str) -> dict[str, Any]:
     """Get statistics for a specific review session: cards reviewed, rating
     breakdown, and accuracy."""
-    return _serialize(core.get_session_stats(DB_PATH, session_id))
+    return _serialize(core.get_session_stats(_db_path(), session_id))
 
 
 @mcp.tool()
@@ -308,7 +361,7 @@ def get_session_stats(session_id: str) -> dict[str, Any]:
 def get_overall_stats() -> dict[str, Any]:
     """Get overall database statistics: total cards, due count, maturity
     breakdown, and average retention."""
-    return _serialize(core.get_overall_stats(DB_PATH))
+    return _serialize(core.get_overall_stats(_db_path()))
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +374,7 @@ def get_overall_stats() -> dict[str, Any]:
 def init_database() -> dict[str, Any]:
     """Initialize the spacedrep database. Run this before any other operation
     if the database doesn't exist yet. Safe to call multiple times (idempotent)."""
-    return core.init_database(DB_PATH)
+    return core.init_database(_db_path())
 
 
 @mcp.tool()
@@ -329,7 +382,7 @@ def init_database() -> dict[str, Any]:
 def get_fsrs_status() -> dict[str, Any]:
     """Get current FSRS scheduler status: parameters, whether they're defaults
     or optimized, review count, and whether optimization is possible."""
-    return _serialize(core.get_fsrs_status(DB_PATH))
+    return _serialize(core.get_fsrs_status(_db_path()))
 
 
 @mcp.tool()
@@ -337,8 +390,9 @@ def get_fsrs_status() -> dict[str, Any]:
 def optimize_fsrs(reschedule: bool = False, dry_run: bool = False) -> dict[str, Any]:
     """Optimize FSRS scheduling parameters from review history. Requires 512+
     reviews. Set reschedule=true to update all card schedules with new parameters.
-    Requires the optimizer extra (pip install spacedrep[optimizer])."""
-    return _serialize(core.optimize_parameters(DB_PATH, reschedule=reschedule, dry_run=dry_run))
+    Requires the optimizer extra (pip install spacedrep[optimizer]).
+    Note: optimization can take 10-60 seconds with many reviews."""
+    return _serialize(core.optimize_parameters(_db_path(), reschedule=reschedule, dry_run=dry_run))
 
 
 def main() -> None:

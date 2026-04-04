@@ -380,14 +380,13 @@ def test_get_fsrs_status_default(tmp_db: Path) -> None:
 
 
 def test_optimize_insufficient_reviews(tmp_db: Path) -> None:
-    # Add a card and review it once — not enough for optimization
+    """With very few reviews, optimization runs but can't meaningfully improve params."""
     core.add_card(tmp_db, "Q", "A", deck="Test")
     review = ReviewInput(card_id=1, rating=3)
     core.submit_review(tmp_db, review)
 
-    # Optimizer is not installed in test env, so we expect the error
-    with pytest.raises(core.OptimizerNotInstalledError):
-        core.optimize_parameters(tmp_db)
+    result = core.optimize_parameters(tmp_db)
+    assert result.review_count == 1
 
 
 def test_params_loaded_from_config(tmp_db: Path) -> None:

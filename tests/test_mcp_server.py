@@ -42,11 +42,9 @@ from spacedrep.mcp_server import (
 
 @pytest.fixture()
 def tmp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Create a temp DB and point mcp_server.DB_PATH at it."""
-    import spacedrep.mcp_server as mcp_mod
-
+    """Create a temp DB and point mcp_server._db_path() at it."""
     db = tmp_path / "test.db"
-    monkeypatch.setattr(mcp_mod, "DB_PATH", db)
+    monkeypatch.setenv("SPACEDREP_DB", str(db))
     core.init_database(db)
     reset_params_loaded()
     return db
@@ -282,13 +280,42 @@ class TestImportDeck:
         with pytest.raises(ToolError):
             import_deck("/nonexistent/file.apkg")
 
+    def test_import_wrong_extension(self, tmp_db: Path, tmp_path: Path) -> None:
+        bad_file = tmp_path / "deck.zip"
+        bad_file.write_bytes(b"fake")
+        with pytest.raises(ToolError, match="Expected .apkg file"):
+            import_deck(str(bad_file))
+
 
 class TestExportDeck:
     def test_export(self, card_id: int, tmp_db: Path, tmp_path: Path) -> None:
         out = tmp_path / "export.apkg"
         result = export_deck(str(out))
         assert result["exported"] == 1
-        assert result["file"] == str(out)
+        assert result["file"] == str(out.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Path validation
+# ---------------------------------------------------------------------------
+
+
+class TestPathValidation:
+    def test_import_path_traversal_blocked(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="must not contain"):
+            import_deck("../../etc/passwd.apkg")
+
+    def test_export_path_traversal_blocked(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="must not contain"):
+            export_deck("../../tmp/evil.apkg")
+
+    def test_import_sensitive_dir_blocked(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="sensitive directory"):
+            import_deck("/home/user/.ssh/keys.apkg")
+
+    def test_export_sensitive_dir_blocked(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="sensitive directory"):
+            export_deck("/home/user/.aws/creds.apkg")
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +336,20 @@ class TestErrorHandling:
         with pytest.raises(ToolError) as exc_info:
             update_card(1)  # no fields provided
         assert "suggestion" in str(exc_info.value)
+
+    def test_unexpected_exception_becomes_tool_error(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-SpacedrepError exceptions should be caught as internal_error."""
+
+        def _raise(db_path: Path, card_id: int) -> None:
+            _ = 1 / 0
+
+        monkeypatch.setattr(core, "get_card_detail", _raise)
+        with pytest.raises(ToolError) as exc_info:
+            get_card(1)
+        error_msg = str(exc_info.value)
+        assert "internal_error" in error_msg
 
 
 # ---------------------------------------------------------------------------
@@ -354,10 +395,8 @@ class TestGetOverallStats:
 
 class TestInitDatabase:
     def test_init(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import spacedrep.mcp_server as mcp_mod
-
         db = tmp_path / "new.db"
-        monkeypatch.setattr(mcp_mod, "DB_PATH", db)
+        monkeypatch.setenv("SPACEDREP_DB", str(db))
         reset_params_loaded()
         result = init_database()
         assert result["status"] == "ok"

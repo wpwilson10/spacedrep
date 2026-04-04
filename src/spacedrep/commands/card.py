@@ -251,12 +251,10 @@ def suspend(
     """
     try:
         result = core.suspend_card(db, card_id, dry_run=dry_run)
-        if isinstance(result, dict):
-            output_json(result)
-        elif quiet:
-            output_quiet(card_id)
+        if quiet and not dry_run:
+            output_quiet(result["card_id"])
         else:
-            output_json({"card_id": card_id, "suspended": True})
+            output_json(result)
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None
@@ -277,12 +275,10 @@ def unsuspend(
     """
     try:
         result = core.unsuspend_card(db, card_id, dry_run=dry_run)
-        if isinstance(result, dict):
-            output_json(result)
-        elif quiet:
-            output_quiet(card_id)
+        if quiet and not dry_run:
+            output_quiet(result["card_id"])
         else:
-            output_json({"card_id": card_id, "suspended": False})
+            output_json(result)
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None

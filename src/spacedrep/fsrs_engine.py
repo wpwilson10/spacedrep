@@ -1,4 +1,11 @@
-"""Thin wrapper around py-fsrs."""
+"""Thin wrapper around py-fsrs.
+
+Concurrency note: _scheduler is module-level mutable state. This is safe
+because FastMCP runs tool functions in an asyncio event loop (single-threaded),
+so only one tool executes at a time. If the MCP server ever moves to threaded
+or multiprocess execution, _scheduler must be protected with a lock or made
+per-request.
+"""
 
 from fsrs import Card, Rating, ReviewLog, Scheduler, State
 

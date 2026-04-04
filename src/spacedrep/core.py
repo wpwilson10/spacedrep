@@ -94,8 +94,8 @@ class NoFieldsProvidedError(SpacedrepError):
     def __init__(self) -> None:
         super().__init__(
             error_code="no_fields",
-            message="Provide at least one of --question, --answer, --tags, --deck",
-            suggestion="Use --question, --answer, --tags, or --deck",
+            message="Provide at least one field to update: question, answer, tags, or deck",
+            suggestion="Set at least one of: question, answer, tags, deck",
             exit_code=2,
         )
 
@@ -130,6 +130,10 @@ class OptimizerNotInstalledError(SpacedrepError):
         )
 
 
+# Concurrency note: _params_loaded guards a one-time load of FSRS parameters
+# from the database into the module-level scheduler. This is safe because
+# FastMCP serializes tool calls via asyncio (single-threaded). If concurrency
+# model changes, this must become a lock-protected initialization.
 _params_loaded = False
 
 
@@ -429,10 +433,8 @@ def update_card(
         return detail
 
 
-def suspend_card(
-    db_path: Path, card_id: int, *, dry_run: bool = False
-) -> bool | dict[str, int | bool]:
-    """Suspend a card. Returns False if not found."""
+def suspend_card(db_path: Path, card_id: int, *, dry_run: bool = False) -> dict[str, int | bool]:
+    """Suspend a card. Raises CardNotFoundError if not found."""
     with _open_db(db_path) as conn:
         if dry_run:
             detail = db.get_card_detail(conn, card_id)
@@ -448,13 +450,11 @@ def suspend_card(
         if not result:
             raise CardNotFoundError(card_id)
         conn.commit()
-        return result
+        return {"card_id": card_id, "suspended": True}
 
 
-def unsuspend_card(
-    db_path: Path, card_id: int, *, dry_run: bool = False
-) -> bool | dict[str, int | bool]:
-    """Unsuspend a card. Returns False if not found."""
+def unsuspend_card(db_path: Path, card_id: int, *, dry_run: bool = False) -> dict[str, int | bool]:
+    """Unsuspend a card. Raises CardNotFoundError if not found."""
     with _open_db(db_path) as conn:
         if dry_run:
             detail = db.get_card_detail(conn, card_id)
@@ -470,7 +470,7 @@ def unsuspend_card(
         if not result:
             raise CardNotFoundError(card_id)
         conn.commit()
-        return result
+        return {"card_id": card_id, "suspended": False}
 
 
 def import_deck(
@@ -486,6 +486,10 @@ def import_deck(
 
     if not apkg_path.exists():
         raise ApkgImportError(f"File not found: {apkg_path}")
+    if apkg_path.suffix.lower() != ".apkg":
+        raise ApkgImportError(
+            f"Expected .apkg file, got '{apkg_path.suffix or 'no extension'}': {apkg_path.name}"
+        )
 
     try:
         decks, cards, field_info, note_deck_map = read_apkg(apkg_path, question_field, answer_field)

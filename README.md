@@ -1,7 +1,7 @@
 # spacedrep
 
-[![PyPI](https://img.shields.io/pypi/v/spacedrep)](https://pypi.org/project/spacedrep/)
-[![Python](https://img.shields.io/pypi/pyversions/spacedrep)](https://pypi.org/project/spacedrep/)
+[![PyPI version](https://badge.fury.io/py/spacedrep.svg)](https://pypi.org/project/spacedrep/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/spacedrep/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Agent-first flashcard CLI with FSRS scheduling and .apkg support.

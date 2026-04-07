@@ -100,19 +100,3 @@ claude mcp add spacedrep -e SPACEDREP_DB=/path/to/reviews.db -- uv run --directo
 ```
 
 Set `SPACEDREP_DB` to configure the database path (default: `./reviews.db`).
-
-## Development
-
-```bash
-git clone https://github.com/wpwilson10/spacedrep.git && cd spacedrep
-uv venv && uv sync --all-extras
-pre-commit install
-
-uv run pytest              # Test
-uv run pyright .           # Type check
-uv run ruff check .        # Lint
-```
-
-## License
-
-MIT

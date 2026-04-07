@@ -1,5 +1,9 @@
 # spacedrep
 
+[![PyPI](https://img.shields.io/pypi/v/spacedrep)](https://pypi.org/project/spacedrep/)
+[![Python](https://img.shields.io/pypi/pyversions/spacedrep)](https://pypi.org/project/spacedrep/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Agent-first flashcard CLI with FSRS scheduling and .apkg support.
 
 A standalone spaced repetition tool that AI coding agents can drive — no Anki desktop required. Import/export .apkg files, schedule reviews with FSRS, manage cards via JSON-native CLI or MCP server.

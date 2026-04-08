@@ -131,6 +131,25 @@ def test_full_flow() -> None:
 # --- get_next_card filter tests ---
 
 
+# --- list_tags tests ---
+
+
+def test_list_tags(populated_db_multi_deck: Path) -> None:
+    tags = core.list_tags(populated_db_multi_deck)
+    assert "compute" in tags
+    assert "s3" in tags
+    assert "trees" in tags
+    assert tags == sorted(tags)
+
+
+def test_list_tags_empty(tmp_db: Path) -> None:
+    tags = core.list_tags(tmp_db)
+    assert tags == []
+
+
+# --- get_next_card filter tests ---
+
+
 def test_get_next_card_by_deck(populated_db_multi_deck: Path) -> None:
     result = core.get_next_card(populated_db_multi_deck, deck="DSA")
     assert result is not None

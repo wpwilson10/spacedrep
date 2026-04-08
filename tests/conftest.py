@@ -40,7 +40,7 @@ def sample_cards() -> list[CardRecord]:
                 "In distributed systems, you can only guarantee two of three:"
                 " consistency, availability, partition tolerance."
             ),
-            tags="distributed,fundamentals",
+            tags="distributed fundamentals",
             source="manual",
         ),
         CardRecord(
@@ -50,14 +50,14 @@ def sample_cards() -> list[CardRecord]:
                 "A consistency model where replicas converge to the same value"
                 " over time, but may return stale reads in the interim."
             ),
-            tags="distributed,consistency",
+            tags="distributed consistency",
             source="manual",
         ),
         CardRecord(
             deck_id=1,
             question="What is S3 storage class: Glacier?",
             answer="Low-cost archival storage with retrieval times from minutes to hours.",
-            tags="aws,s3,storage",
+            tags="aws s3 storage",
             source="manual",
         ),
     ]
@@ -87,7 +87,7 @@ def populated_db_multi_deck(tmp_db: Path) -> Path:
             deck_id=aws_id,
             question="What is S3?",
             answer="Object storage",
-            tags="s3,storage",
+            tags="s3 storage",
         ),
         CardRecord(
             deck_id=aws_id,
@@ -99,7 +99,7 @@ def populated_db_multi_deck(tmp_db: Path) -> Path:
             deck_id=aws_id,
             question="What is Lambda?",
             answer="Serverless compute",
-            tags="compute,serverless",
+            tags="compute serverless",
         ),
     ]
     dsa_cards = [
@@ -113,7 +113,7 @@ def populated_db_multi_deck(tmp_db: Path) -> Path:
             deck_id=dsa_id,
             question="What is BFS?",
             answer="Breadth-first search",
-            tags="graphs,search",
+            tags="graphs search",
         ),
     ]
     for card in aws_cards + dsa_cards:

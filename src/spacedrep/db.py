@@ -125,8 +125,12 @@ def _add_column_if_missing(
 
 
 def migrate_db(conn: sqlite3.Connection) -> None:
-    """Run idempotent schema migrations for v0.2."""
+    """Run idempotent schema migrations."""
     _add_column_if_missing(conn, "fsrs_state", "lapse_count", "INTEGER NOT NULL DEFAULT 0")
+    # Convert comma-separated tags to space-separated (idempotent)
+    rows = conn.execute("PRAGMA table_info(cards)").fetchall()
+    if rows:
+        conn.execute("UPDATE cards SET tags = REPLACE(tags, ',', ' ') WHERE tags LIKE '%,%'")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY,
@@ -161,8 +165,10 @@ def _build_card_filter_clauses(
     if tags:
         tag_conditions: list[str] = []
         for tag in tags:
-            tag_conditions.append("(',' || c.tags || ',') LIKE ?")
-            params.append(f"%,{tag},%")
+            tag_conditions.append(
+                "((' ' || c.tags || ' ') LIKE ? OR (' ' || c.tags || ' ') LIKE ?)"
+            )
+            params.extend([f"% {tag} %", f"% {tag}::%"])
         clauses.append(f"AND ({' OR '.join(tag_conditions)})")
 
     if state is not None:
@@ -759,6 +765,19 @@ def get_review_logs_for_card(conn: sqlite3.Connection, card_id: int) -> list[str
         (card_id,),
     ).fetchall()
     return [r["fsrs_log_json"] for r in rows]
+
+
+# --- Tag operations ---
+
+
+def list_tags(conn: sqlite3.Connection) -> list[str]:
+    """Return all unique tags from the database, sorted alphabetically."""
+    rows = conn.execute("SELECT tags FROM cards WHERE tags != ''").fetchall()
+    tag_set: set[str] = set()
+    for row in rows:
+        for tag in row["tags"].split():
+            tag_set.add(tag)
+    return sorted(tag_set)
 
 
 # --- Helpers ---

@@ -30,6 +30,7 @@ from spacedrep.mcp_server import (
     init_database,
     list_cards,
     list_decks,
+    list_tags,
     optimize_fsrs,
     preview_review,
     submit_review,
@@ -71,10 +72,10 @@ class TestAddCard:
         assert result["deck"] == "Default"
 
     def test_with_deck_and_tags(self, tmp_db: Path) -> None:
-        result = add_card("Q1", "A1", deck="AWS", tags="s3,storage")
+        result = add_card("Q1", "A1", deck="AWS", tags="s3 storage")
         assert result["deck"] == "AWS"
         detail = core.get_card_detail(tmp_db, result["card_id"])
-        assert detail.tags == "s3,storage"
+        assert detail.tags == "s3 storage"
 
 
 class TestAddCardsBulk:
@@ -248,6 +249,18 @@ class TestPreviewReview:
 # ---------------------------------------------------------------------------
 # Deck tools
 # ---------------------------------------------------------------------------
+
+
+class TestListTags:
+    def test_empty(self, tmp_db: Path) -> None:
+        result = list_tags()
+        assert result["tags"] == []
+        assert result["count"] == 0
+
+    def test_with_cards(self, card_id: int, tmp_db: Path) -> None:
+        result = list_tags()
+        assert "distributed" in result["tags"]
+        assert result["count"] >= 1
 
 
 class TestListDecks:
@@ -455,7 +468,7 @@ class TestOptimizeFsrs:
 # ---------------------------------------------------------------------------
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean"}
-EXPECTED_TOOL_COUNT = 20
+EXPECTED_TOOL_COUNT = 21
 
 
 def _get_tools() -> dict[str, object]:

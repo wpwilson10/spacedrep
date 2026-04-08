@@ -65,7 +65,7 @@ def write_apkg(
         )
 
         for card in deck_cards:
-            tags = [t.strip() for t in card.tags.split(",") if t.strip()] if card.tags else []
+            tags = card.tags.split() if card.tags else []
             if card.source == "generated":
                 tags.append("ai_generated")
 

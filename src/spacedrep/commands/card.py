@@ -16,16 +16,16 @@ DRY_RUN_OPT = typer.Option(
 
 
 def _parse_tags(tags: str | None) -> list[str] | None:
-    """Parse comma-separated tags string into a list, or None if empty."""
+    """Parse space-separated tags string into a list, or None if empty."""
     if not tags:
         return None
-    return [t.strip() for t in tags.split(",") if t.strip()]
+    return tags.split()
 
 
 @card_app.command("next")
 def next_card(
     deck: str | None = typer.Option(None, help="Filter by deck name"),
-    tags: str | None = typer.Option(None, help="Filter by comma-separated tags"),
+    tags: str | None = typer.Option(None, help="Filter by space-separated tags"),
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"
     ),
@@ -36,7 +36,7 @@ def next_card(
 
     Example:
         spacedrep card next
-        spacedrep card next --deck AWS --tags s3,storage
+        spacedrep card next --deck AWS --tags "s3 storage"
         spacedrep card next --state new
         spacedrep card next -q
     """
@@ -62,7 +62,7 @@ def add_card(
     question: str = typer.Argument(..., help="The card question"),
     answer: str = typer.Argument(..., help="The card answer"),
     deck: str = typer.Option("Default", help="Deck name"),
-    tags: str = typer.Option("", help="Comma-separated tags"),
+    tags: str = typer.Option("", help="Space-separated tags"),
     quiet: bool = QUIET_OPT,
     db: Path = DB_DEFAULT,
 ) -> None:
@@ -122,7 +122,7 @@ def add_bulk(
 @card_app.command("list")
 def list_cards(
     deck: str | None = typer.Option(None, help="Filter by deck name"),
-    tags: str | None = typer.Option(None, help="Filter by comma-separated tags"),
+    tags: str | None = typer.Option(None, help="Filter by space-separated tags"),
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"
     ),
@@ -153,6 +153,29 @@ def list_cards(
             output_quiet([c.card_id for c in result.cards])
         else:
             output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
+@card_app.command("tags")
+def list_tags(
+    quiet: bool = QUIET_OPT,
+    db: Path = DB_DEFAULT,
+) -> None:
+    """List all unique tags in the database.
+
+    Example:
+        spacedrep card tags
+        spacedrep card tags -q
+    """
+    try:
+        tags = core.list_tags(db)
+        if quiet:
+            for tag in tags:
+                output_quiet(tag)
+        else:
+            output_json({"tags": tags, "count": len(tags)})
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None
@@ -209,7 +232,7 @@ def update_card(
     card_id: int = typer.Argument(..., help="Card ID to update"),
     question: str | None = typer.Option(None, help="New question text"),
     answer: str | None = typer.Option(None, help="New answer text"),
-    tags: str | None = typer.Option(None, help="New comma-separated tags"),
+    tags: str | None = typer.Option(None, help="New space-separated tags"),
     deck: str | None = typer.Option(None, help="Move to deck"),
     quiet: bool = QUIET_OPT,
     db: Path = DB_DEFAULT,

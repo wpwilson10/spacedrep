@@ -77,10 +77,10 @@ def _or_none(val: str) -> str | None:
 
 
 def _parse_tags(tags: str) -> list[str] | None:
-    """Parse comma-separated tags string into a list, or None if empty."""
+    """Parse space-separated tags string into a list, or None if empty."""
     if not tags:
         return None
-    return [t.strip() for t in tags.split(",") if t.strip()]
+    return tags.split()
 
 
 def _validate_file_path(path_str: str, *, must_exist: bool = False) -> Path:
@@ -129,10 +129,11 @@ def add_card(
     question: str,
     answer: str,
     deck: Annotated[str, Field(description="Deck name (created if new)")] = "Default",
-    tags: Annotated[str, Field(description="Comma-separated tag names")] = "",
+    tags: Annotated[str, Field(description="Space-separated tag names")] = "",
 ) -> dict[str, Any]:
     """Add a new flashcard. Use when the user wants to create a single card.
-    Tags are comma-separated. Returns the new card ID and deck name."""
+    Tags are space-separated. Use :: for hierarchy (e.g. 'foundations::rag').
+    Returns the new card ID and deck name."""
     return core.add_card(_db_path(), question, answer, deck=deck, tags=tags)
 
 
@@ -162,11 +163,12 @@ def add_cards_bulk(
 @_handle_errors
 def get_next_card(
     deck: Annotated[str, Field(description="Deck name to filter by")] = "",
-    tags: Annotated[str, Field(description="Comma-separated tag names to filter by")] = "",
+    tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
 ) -> dict[str, Any]:
     """Get the next flashcard due for review. Use at the start of a study session.
-    Filter by deck name, comma-separated tags, or state (new/learning/review/relearning).
+    Filter by deck name, space-separated tags, or state (new/learning/review/relearning).
+    Tag filter matches the tag and all children (e.g. 'foundations' matches 'foundations::rag').
     Returns card details or a message if no cards are due."""
     result = core.get_next_card(
         _db_path(),
@@ -184,14 +186,15 @@ def get_next_card(
 @_handle_errors
 def list_cards(
     deck: Annotated[str, Field(description="Deck name to filter by")] = "",
-    tags: Annotated[str, Field(description="Comma-separated tag names to filter by")] = "",
+    tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
     leeches_only: Annotated[bool, Field(description="Only show leech cards (8+ lapses)")] = False,
     limit: Annotated[int, Field(description="Max cards to return")] = 50,
     offset: Annotated[int, Field(description="Skip this many cards (for pagination)")] = 0,
 ) -> dict[str, Any]:
     """List flashcards with optional filters and pagination. Use to browse or
-    search cards. Filter by deck, comma-separated tags, state, or leeches only."""
+    search cards. Filter by deck, space-separated tags, state, or leeches only.
+    Tag filter matches the tag and all children (e.g. 'foundations' matches 'foundations::rag')."""
     return _serialize(
         core.list_cards(
             _db_path(),
@@ -219,7 +222,7 @@ def update_card(
     card_id: int,
     question: Annotated[str, Field(description="New question text")] = "",
     answer: Annotated[str, Field(description="New answer text")] = "",
-    tags: Annotated[str, Field(description="New comma-separated tags")] = "",
+    tags: Annotated[str, Field(description="New space-separated tags")] = "",
     deck: Annotated[str, Field(description="Move card to this deck")] = "",
 ) -> dict[str, Any]:
     """Update a flashcard's question, answer, tags, or deck. Only non-empty
@@ -347,6 +350,21 @@ def export_deck(
     validated = _validate_file_path(output_path)
     count = core.export_deck(_db_path(), validated, _or_none(deck))
     return {"exported": count, "file": str(validated)}
+
+
+# ---------------------------------------------------------------------------
+# Tag tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+@_handle_errors
+def list_tags() -> dict[str, object]:
+    """List all unique tags in the database. Use to discover the tag
+    taxonomy before filtering cards by tag. Tags use :: for hierarchy
+    (e.g. 'foundations::rag::chunking')."""
+    tags = core.list_tags(_db_path())
+    return {"tags": tags, "count": len(tags)}
 
 
 # ---------------------------------------------------------------------------

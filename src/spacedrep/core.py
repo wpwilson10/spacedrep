@@ -593,6 +593,12 @@ def list_decks(db_path: Path) -> list[DeckInfo]:
         return db.list_decks(conn)
 
 
+def list_tags(db_path: Path) -> list[str]:
+    """Return all unique tags from the database, sorted alphabetically."""
+    with _open_db(db_path) as conn:
+        return db.list_tags(conn)
+
+
 def get_due_count(db_path: Path) -> DueCount:
     """Get count of due cards by state."""
     with _open_db(db_path) as conn:

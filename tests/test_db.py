@@ -336,6 +336,134 @@ def test_list_cards_leech_filter(populated_db: Path) -> None:
     conn.close()
 
 
+# --- Tag hierarchy filter tests ---
+
+
+def test_tag_filter_matches_children(tmp_db: Path) -> None:
+    """tags=["parent"] should match cards tagged parent::child."""
+    conn = db.get_connection(tmp_db)
+    deck_id = db.upsert_deck(conn, "Test")
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="foundations::bedrock::apis"),
+    )
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="other"),
+    )
+    conn.commit()
+
+    result = db.list_cards(conn, tags=["foundations"])
+    assert result.total == 1
+    assert result.cards[0].question == "Q1"
+    conn.close()
+
+
+def test_tag_filter_no_cross_hierarchy(tmp_db: Path) -> None:
+    """tags=["chunking"] should NOT match foundations::rag::chunking."""
+    conn = db.get_connection(tmp_db)
+    deck_id = db.upsert_deck(conn, "Test")
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="foundations::rag::chunking"),
+    )
+    conn.commit()
+
+    result = db.list_cards(conn, tags=["chunking"])
+    assert result.total == 0
+    conn.close()
+
+
+def test_tag_filter_multi_level(tmp_db: Path) -> None:
+    """tags=["parent::child"] should match parent::child::grandchild."""
+    conn = db.get_connection(tmp_db)
+    deck_id = db.upsert_deck(conn, "Test")
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="parent::child::grandchild"),
+    )
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="parent::child"),
+    )
+    conn.commit()
+
+    result = db.list_cards(conn, tags=["parent::child"])
+    assert result.total == 2
+    conn.close()
+
+
+def test_tag_filter_exact_match(tmp_db: Path) -> None:
+    """tags=["AIP-C01"] should match exactly, not partial."""
+    conn = db.get_connection(tmp_db)
+    deck_id = db.upsert_deck(conn, "Test")
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="AIP-C01"),
+    )
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="AIP"),
+    )
+    conn.commit()
+
+    result = db.list_cards(conn, tags=["AIP-C01"])
+    assert result.total == 1
+    assert result.cards[0].question == "Q1"
+    conn.close()
+
+
+# --- list_tags tests ---
+
+
+def test_list_tags(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    deck_id = db.upsert_deck(conn, "Test")
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="aws s3 storage"),
+    )
+    db.insert_card(
+        conn,
+        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="aws compute"),
+    )
+    conn.commit()
+
+    tags = db.list_tags(conn)
+    assert tags == ["aws", "compute", "s3", "storage"]
+    conn.close()
+
+
+def test_list_tags_empty(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    tags = db.list_tags(conn)
+    assert tags == []
+    conn.close()
+
+
+# --- Migration tests ---
+
+
+def test_tag_migration_commas_to_spaces(tmp_db: Path) -> None:
+    """migrate_db converts comma-separated tags to space-separated."""
+    conn = db.get_connection(tmp_db)
+    deck_id = db.upsert_deck(conn, "Test")
+    # Insert with raw comma-separated tags (bypass migration)
+    conn.execute(
+        "INSERT INTO cards (deck_id, question, answer, tags) VALUES (?, ?, ?, ?)",
+        (deck_id, "Q1", "A1", "aws,s3,storage"),
+    )
+    conn.commit()
+
+    # Run migration
+    db.migrate_db(conn)
+    conn.commit()
+
+    row = conn.execute("SELECT tags FROM cards WHERE question = 'Q1'").fetchone()
+    assert row["tags"] == "aws s3 storage"
+    conn.close()
+
+
 # --- Config tests ---
 
 

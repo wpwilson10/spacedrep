@@ -143,7 +143,7 @@ class TestCardList:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1", tags="s3,storage")
+            _add_card(db_path, "Q1", "A1", tags="s3 storage")
             _add_card(db_path, "Q2", "A2", tags="compute")
 
             result = _run(["card", "list", "--tags", "s3"], db_path)
@@ -164,6 +164,43 @@ class TestCardList:
             data = json.loads(result.stdout)
             assert len(data["cards"]) == 2
             assert data["total"] == 3
+
+
+class TestCardTags:
+    def test_tags_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "tags"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["tags"] == []
+            assert data["count"] == 0
+
+    def test_tags_with_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", tags="aws s3")
+            _add_card(db_path, "Q2", "A2", tags="aws compute")
+
+            result = _run(["card", "tags"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert sorted(data["tags"]) == ["aws", "compute", "s3"]
+            assert data["count"] == 3
+
+    def test_tags_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1", tags="aws s3")
+
+            result = _run(["card", "tags", "-q"], db_path)
+            assert result.returncode == 0
+            lines = sorted(result.stdout.strip().split("\n"))
+            assert lines == ["aws", "s3"]
 
 
 class TestCardGet:
@@ -281,7 +318,7 @@ class TestCardNextFilters:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1", tags="s3,storage")
+            _add_card(db_path, "Q1", "A1", tags="s3 storage")
             _add_card(db_path, "Q2", "A2", tags="compute")
 
             result = _run(["card", "next", "--tags", "compute"], db_path)

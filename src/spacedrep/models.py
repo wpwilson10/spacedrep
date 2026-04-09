@@ -25,6 +25,7 @@ class CardRecord(BaseModel):
     source: CardSource = "manual"
     source_note_id: int | None = None
     source_note_guid: str | None = None
+    source_card_ord: int = 0
     created_at: datetime | None = None
     suspended: bool = False
 

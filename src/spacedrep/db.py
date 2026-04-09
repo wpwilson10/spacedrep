@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS cards (
     source TEXT NOT NULL DEFAULT 'manual',
     source_note_id INTEGER,
     source_note_guid TEXT,
+    source_card_ord INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     suspended INTEGER NOT NULL DEFAULT 0
 );
@@ -80,7 +81,7 @@ CREATE TABLE IF NOT EXISTS review_logs (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_source_note
-    ON cards(source_note_id) WHERE source_note_id IS NOT NULL;
+    ON cards(source_note_id, source_card_ord) WHERE source_note_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_fsrs_due ON fsrs_state(due);
 CREATE INDEX IF NOT EXISTS idx_fsrs_state ON fsrs_state(state);
 CREATE INDEX IF NOT EXISTS idx_review_card ON review_logs(card_id, reviewed_at);
@@ -127,10 +128,18 @@ def _add_column_if_missing(
 def migrate_db(conn: sqlite3.Connection) -> None:
     """Run idempotent schema migrations."""
     _add_column_if_missing(conn, "fsrs_state", "lapse_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "cards", "source_card_ord", "INTEGER NOT NULL DEFAULT 0")
     # Convert comma-separated tags to space-separated (idempotent)
     rows = conn.execute("PRAGMA table_info(cards)").fetchall()
     if rows:
         conn.execute("UPDATE cards SET tags = REPLACE(tags, ',', ' ') WHERE tags LIKE '%,%'")
+        # Recreate source_note index as composite key (idempotent via DROP IF EXISTS).
+        # Only runs when cards table exists — fresh DBs get the correct index from _SCHEMA.
+        conn.executescript("""
+            DROP INDEX IF EXISTS idx_cards_source_note;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_source_note
+                ON cards(source_note_id, source_card_ord) WHERE source_note_id IS NOT NULL;
+        """)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY,
@@ -159,8 +168,8 @@ def _build_card_filter_clauses(
     params: list[str | int] = []
 
     if deck is not None:
-        clauses.append("AND d.name = ?")
-        params.append(deck)
+        clauses.append("AND (d.name = ? OR d.name LIKE ?)")
+        params.extend([deck, f"{deck}::%"])
 
     if tags:
         tag_conditions: list[str] = []
@@ -247,13 +256,13 @@ def insert_card(conn: sqlite3.Connection, card: CardRecord) -> tuple[int, bool]:
 
     if card.source_note_id is not None:
         existing = conn.execute(
-            "SELECT id FROM cards WHERE source_note_id = ?",
-            (card.source_note_id,),
+            "SELECT id FROM cards WHERE source_note_id = ? AND source_card_ord = ?",
+            (card.source_note_id, card.source_card_ord),
         ).fetchone()
         if existing:
             conn.execute(
                 """UPDATE cards SET question = ?, answer = ?, extra_fields = ?,
-                   tags = ?, source_note_guid = ?
+                   tags = ?, source_note_guid = ?, suspended = ?, deck_id = ?
                    WHERE id = ?""",
                 (
                     card.question,
@@ -261,6 +270,8 @@ def insert_card(conn: sqlite3.Connection, card: CardRecord) -> tuple[int, bool]:
                     extra_json,
                     card.tags,
                     card.source_note_guid,
+                    int(card.suspended),
+                    card.deck_id,
                     existing["id"],
                 ),
             )
@@ -268,8 +279,8 @@ def insert_card(conn: sqlite3.Connection, card: CardRecord) -> tuple[int, bool]:
 
     cursor = conn.execute(
         """INSERT INTO cards (deck_id, question, answer, extra_fields, tags, source,
-           source_note_id, source_note_guid, suspended)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           source_note_id, source_note_guid, source_card_ord, suspended)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             card.deck_id,
             card.question,
@@ -279,6 +290,7 @@ def insert_card(conn: sqlite3.Connection, card: CardRecord) -> tuple[int, bool]:
             card.source,
             card.source_note_id,
             card.source_note_guid,
+            card.source_card_ord,
             int(card.suspended),
         ),
     )
@@ -796,6 +808,7 @@ def _row_to_card_record(row: sqlite3.Row) -> CardRecord:
         source=row["source"],
         source_note_id=row["source_note_id"],
         source_note_guid=row["source_note_guid"],
+        source_card_ord=row["source_card_ord"],
         created_at=row["created_at"],
         suspended=bool(row["suspended"]),
     )

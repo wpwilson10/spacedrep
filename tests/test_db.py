@@ -413,6 +413,66 @@ def test_tag_filter_exact_match(tmp_db: Path) -> None:
     conn.close()
 
 
+# --- Deck hierarchy filter tests ---
+
+
+def test_deck_hierarchy_exact_match(tmp_db: Path) -> None:
+    """Filtering by 'AWS' matches cards in the 'AWS' deck."""
+    conn = db.get_connection(tmp_db)
+    aws_id = db.upsert_deck(conn, "AWS")
+    other_id = db.upsert_deck(conn, "Other")
+    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q1", answer="A1"))
+    db.insert_card(conn, CardRecord(deck_id=other_id, question="Q2", answer="A2"))
+    conn.commit()
+    result = db.list_cards(conn, deck="AWS")
+    assert result.total == 1
+    assert result.cards[0].question == "Q1"
+    conn.close()
+
+
+def test_deck_hierarchy_child_match(tmp_db: Path) -> None:
+    """Filtering by 'AWS' also matches 'AWS::S3' and 'AWS::S3::Glacier'."""
+    conn = db.get_connection(tmp_db)
+    aws_id = db.upsert_deck(conn, "AWS")
+    s3_id = db.upsert_deck(conn, "AWS::S3")
+    glacier_id = db.upsert_deck(conn, "AWS::S3::Glacier")
+    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q-AWS", answer="A"))
+    db.insert_card(conn, CardRecord(deck_id=s3_id, question="Q-S3", answer="A"))
+    db.insert_card(conn, CardRecord(deck_id=glacier_id, question="Q-Glacier", answer="A"))
+    conn.commit()
+    result = db.list_cards(conn, deck="AWS")
+    assert result.total == 3
+    conn.close()
+
+
+def test_deck_hierarchy_no_false_positive(tmp_db: Path) -> None:
+    """Filtering by 'AWS' must not match 'AWSome' (no :: separator)."""
+    conn = db.get_connection(tmp_db)
+    aws_id = db.upsert_deck(conn, "AWS")
+    awesome_id = db.upsert_deck(conn, "AWSome")
+    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q1", answer="A1"))
+    db.insert_card(conn, CardRecord(deck_id=awesome_id, question="Q2", answer="A2"))
+    conn.commit()
+    result = db.list_cards(conn, deck="AWS")
+    assert result.total == 1
+    assert result.cards[0].question == "Q1"
+    conn.close()
+
+
+def test_deck_hierarchy_child_only(tmp_db: Path) -> None:
+    """Filtering by 'AWS::S3' matches 'AWS::S3' but not parent 'AWS'."""
+    conn = db.get_connection(tmp_db)
+    aws_id = db.upsert_deck(conn, "AWS")
+    s3_id = db.upsert_deck(conn, "AWS::S3")
+    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q-AWS", answer="A"))
+    db.insert_card(conn, CardRecord(deck_id=s3_id, question="Q-S3", answer="A"))
+    conn.commit()
+    result = db.list_cards(conn, deck="AWS::S3")
+    assert result.total == 1
+    assert result.cards[0].question == "Q-S3"
+    conn.close()
+
+
 # --- list_tags tests ---
 
 

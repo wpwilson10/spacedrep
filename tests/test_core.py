@@ -428,3 +428,108 @@ def test_params_loaded_from_config(tmp_db: Path) -> None:
     status = core.get_fsrs_status(tmp_db)
     assert not status.is_default
     assert abs(status.parameters[0] - 0.1234) < 0.001
+
+
+# --- Anki compatibility import tests ---
+
+
+def test_import_cloze_produces_two_cards(tmp_db: Path, cloze_apkg: Path) -> None:
+    result = core.import_deck(tmp_db, cloze_apkg)
+    assert result.imported == 2
+    assert result.updated == 0
+    cards = core.list_cards(tmp_db).cards
+    questions = {c.question[:20] for c in cards}
+    assert any("[...]" in q for q in questions)
+
+
+def test_import_cloze_content(tmp_db: Path, cloze_apkg: Path) -> None:
+    core.import_deck(tmp_db, cloze_apkg)
+    cards = core.list_cards(tmp_db).cards
+    details = [core.get_card_detail(tmp_db, c.card_id) for c in cards]
+    # Sort by card_id to get stable c1, c2 order
+    details.sort(key=lambda d: d.card_id)
+    # c1 (ord=0): Ottawa blanked, Canada shown
+    assert "[...]" in details[0].question and "Canada" in details[0].question
+    # c2 (ord=1): Ottawa shown, Canada blanked
+    assert "Ottawa" in details[1].question and "[...]" in details[1].question
+
+
+def test_import_basic_reversed_produces_two_cards(tmp_db: Path, basic_reversed_apkg: Path) -> None:
+    result = core.import_deck(tmp_db, basic_reversed_apkg)
+    assert result.imported == 2
+    cards = core.list_cards(tmp_db).cards
+    questions = {c.question for c in cards}
+    assert "What is Python?" in questions
+    assert "A programming language" in questions
+
+
+def test_import_suspended_cards(tmp_db: Path, suspended_apkg: Path) -> None:
+    result = core.import_deck(tmp_db, suspended_apkg)
+    assert result.imported == 2
+    cards = core.list_cards(tmp_db).cards
+    suspended = [c for c in cards if c.suspended]
+    active = [c for c in cards if not c.suspended]
+    assert len(suspended) == 1
+    assert len(active) == 1
+    assert suspended[0].question == "Suspended Q"
+
+
+def test_import_mixed_apkg(tmp_db: Path, mixed_apkg: Path) -> None:
+    result = core.import_deck(tmp_db, mixed_apkg)
+    assert result.imported == 5  # 2 cloze + 2 reversed + 1 basic
+    cards = core.list_cards(tmp_db).cards
+    suspended = [c for c in cards if c.suspended]
+    assert len(suspended) == 1
+    assert suspended[0].question == "Leech Q"
+
+
+def test_import_dedup_composite_key(tmp_db: Path, cloze_apkg: Path) -> None:
+    first = core.import_deck(tmp_db, cloze_apkg)
+    assert first.imported == 2
+    second = core.import_deck(tmp_db, cloze_apkg)
+    assert second.updated == 2
+    assert second.imported == 0
+    # Still only 2 cards total
+    assert core.list_cards(tmp_db).total == 2
+
+
+def test_import_reimport_updates_suspended(
+    tmp_db: Path, suspended_apkg: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Re-import with changed suspension status updates the card."""
+    from tests.conftest import BASIC_MODEL, DEFAULT_DECK, build_anki_apkg
+
+    core.import_deck(tmp_db, suspended_apkg)
+    cards = core.list_cards(tmp_db).cards
+    assert any(c.suspended for c in cards)
+
+    # Build a modified apkg where the suspended card is now active
+    tmp = tmp_path_factory.mktemp("reimport")
+    unsuspended_apkg = build_anki_apkg(
+        tmp,
+        "unsuspended",
+        models=BASIC_MODEL,
+        decks=DEFAULT_DECK,
+        notes=[
+            (300, "1000", "Active Q\x1fActive A", "guid3", ""),
+            (301, "1000", "Suspended Q\x1fSuspended A", "guid4", ""),
+        ],
+        cards=[
+            (5, 300, 1, 0, 0),  # still active
+            (6, 301, 1, 0, 0),  # was suspended, now active (queue=0)
+        ],
+    )
+    result = core.import_deck(tmp_db, unsuspended_apkg)
+    assert result.updated == 2
+
+    cards = core.list_cards(tmp_db).cards
+    assert not any(c.suspended for c in cards)
+
+
+def test_import_dry_run_multi_card(tmp_db: Path, mixed_apkg: Path) -> None:
+    result = core.import_deck(tmp_db, mixed_apkg, dry_run=True)
+    assert result.dry_run is True
+    assert result.imported == 5
+    assert result.updated == 0
+    # No cards actually written
+    assert core.list_cards(tmp_db).total == 0

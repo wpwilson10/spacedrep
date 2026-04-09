@@ -24,7 +24,7 @@ def _parse_tags(tags: str | None) -> list[str] | None:
 
 @card_app.command("next")
 def next_card(
-    deck: str | None = typer.Option(None, help="Filter by deck name"),
+    deck: str | None = typer.Option(None, help="Filter by deck (includes :: sub-decks)"),
     tags: str | None = typer.Option(None, help="Filter by space-separated tags"),
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"
@@ -121,7 +121,7 @@ def add_bulk(
 
 @card_app.command("list")
 def list_cards(
-    deck: str | None = typer.Option(None, help="Filter by deck name"),
+    deck: str | None = typer.Option(None, help="Filter by deck (includes :: sub-decks)"),
     tags: str | None = typer.Option(None, help="Filter by space-separated tags"),
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"

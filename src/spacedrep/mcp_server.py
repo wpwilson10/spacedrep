@@ -162,12 +162,12 @@ def add_cards_bulk(
 @mcp.tool()
 @_handle_errors
 def get_next_card(
-    deck: Annotated[str, Field(description="Deck name to filter by")] = "",
+    deck: Annotated[str, Field(description="Deck name to filter by (includes :: sub-decks)")] = "",
     tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
 ) -> dict[str, Any]:
     """Get the next flashcard due for review. Use at the start of a study session.
-    Filter by deck name, space-separated tags, or state (new/learning/review/relearning).
+    Filter by deck name (includes :: sub-decks), space-separated tags, or state.
     Tag filter matches the tag and all children (e.g. 'foundations' matches 'foundations::rag').
     Returns card details or a message if no cards are due."""
     result = core.get_next_card(
@@ -185,7 +185,7 @@ def get_next_card(
 @mcp.tool()
 @_handle_errors
 def list_cards(
-    deck: Annotated[str, Field(description="Deck name to filter by")] = "",
+    deck: Annotated[str, Field(description="Deck name to filter by (includes :: sub-decks)")] = "",
     tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
     leeches_only: Annotated[bool, Field(description="Only show leech cards (8+ lapses)")] = False,
@@ -193,7 +193,7 @@ def list_cards(
     offset: Annotated[int, Field(description="Skip this many cards (for pagination)")] = 0,
 ) -> dict[str, Any]:
     """List flashcards with optional filters and pagination. Use to browse or
-    search cards. Filter by deck, space-separated tags, state, or leeches only.
+    search cards. Filter by deck (includes :: sub-decks), tags, state, or leeches.
     Tag filter matches the tag and all children (e.g. 'foundations' matches 'foundations::rag')."""
     return _serialize(
         core.list_cards(

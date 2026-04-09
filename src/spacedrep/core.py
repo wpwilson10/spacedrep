@@ -513,8 +513,8 @@ def import_deck(
             for card in cards:
                 if card.source_note_id is not None:
                     existing = conn.execute(
-                        "SELECT 1 FROM cards WHERE source_note_id = ?",
-                        (card.source_note_id,),
+                        "SELECT 1 FROM cards WHERE source_note_id = ? AND source_card_ord = ?",
+                        (card.source_note_id, card.source_card_ord),
                     ).fetchone()
                     if existing:
                         would_update += 1
@@ -540,9 +540,10 @@ def import_deck(
             db.upsert_deck(conn, deck_rec.name, deck_rec.source_id)
 
         for card in cards:
-            # Resolve per-card deck from the note→deck mapping
-            if card.source_note_id and card.source_note_id in note_deck_map:
-                card_deck = note_deck_map[card.source_note_id]
+            # Resolve per-card deck from the (note_id, ord)→deck mapping
+            note_id = card.source_note_id
+            if note_id is not None and (note_id, card.source_card_ord) in note_deck_map:
+                card_deck = note_deck_map[(note_id, card.source_card_ord)]
             else:
                 card_deck = first_deck
             deck_id = db.upsert_deck(conn, card_deck)

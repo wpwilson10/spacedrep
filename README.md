@@ -4,76 +4,60 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/spacedrep/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Agent-first flashcard CLI with FSRS scheduling and .apkg support.
+Spaced repetition you can script. A CLI and [MCP server](https://modelcontextprotocol.io/) for flashcards — so an AI agent can generate cards from what you're learning, quiz you in conversation, and manage your deck alongside you.
 
-A standalone spaced repetition tool that AI coding agents can drive — no Anki desktop required. Import/export .apkg files, schedule reviews with FSRS, manage cards via JSON-native CLI or MCP server.
+Import your existing Anki decks to get started. Scheduling uses [FSRS](https://github.com/open-spaced-repetition/py-fsrs) (same algorithm as Anki 23.10+). Everything is JSON in, JSON out — pipe it, script it, or let an agent drive it. [Why build a CLI this way.](https://dev.to/uenyioha/writing-cli-tools-that-ai-agents-actually-want-to-use-39no)
 
 ## Install
 
 ```bash
 pip install spacedrep
-
-# With MCP server support
-pip install spacedrep[mcp]
-
-# With FSRS optimizer (requires torch)
-pip install spacedrep[optimizer]
 ```
+
+Optional extras: `spacedrep[mcp]` for the MCP server, `spacedrep[optimizer]` for FSRS parameter optimization (requires torch).
 
 ## Quick Start
 
 ```bash
-# Initialize database
 spacedrep db init
-
-# Add a card
 spacedrep card add "What is CAP theorem?" "Pick 2 of 3: consistency, availability, partition tolerance" --deck AWS
-
-# Bulk add from JSON
-echo '[{"question":"Q1","answer":"A1","deck":"AWS"}]' | spacedrep card add-bulk
-
-# Study: get next due card, preview outcomes, submit rating
 spacedrep card next
-spacedrep review preview 1
 spacedrep review submit 1 good
-
-# Check what's due
-spacedrep stats due
-
-# Import/export Anki decks
-spacedrep deck import ~/Downloads/deck.apkg
-spacedrep deck export ./export.apkg --deck AWS
-
-# Pipe card IDs for scripting
-spacedrep card list -q | xargs -I{} spacedrep card get {}
-
-# Preview destructive operations
-spacedrep card delete 42 --dry-run
 ```
 
-Run `spacedrep --help` for all commands and options.
+Import an existing Anki deck:
 
-## Agent-First Design
+```bash
+spacedrep deck import ~/Downloads/deck.apkg
+```
 
-- **JSON to stdout, errors to stderr** — stdout is the API contract
-- **Meaningful exit codes** — 0=success, 2=usage error, 3=not found
-- **Idempotent** — imports dedup, adds are safe to retry
-- **Non-interactive** — no prompts, no confirmation dialogs
-- **`--quiet` mode** — bare values for piping into `xargs` or `while read`
-- **`--dry-run`** — preview destructive operations without side effects
+See `spacedrep --help` and `spacedrep <command> --help` for all options.
 
-## How It Works
+## Features
 
-- **FSRS scheduling** — the same algorithm built into Anki since v23.10, via [py-fsrs](https://github.com/open-spaced-repetition/py-fsrs)
-- **Leech detection** — cards rated "again" 8+ times while in Review/Relearning are auto-suspended
+- **FSRS scheduling** — the same algorithm Anki uses since v23.10, via [py-fsrs](https://github.com/open-spaced-repetition/py-fsrs)
+- **Anki import/export** — bring your `.apkg` decks (see compatibility below)
+- **Leech detection** — cards rated "again" 8+ times are auto-suspended
 - **Review preview** — see what each rating would produce before committing
-- **Parameter optimization** — personalize FSRS from your review history (`pip install spacedrep[optimizer]`)
-- **SQLite storage** — single file, SQL-queryable review history
-- **.apkg compatible** — import from and export to Anki
+- **Parameter optimization** — personalize FSRS from your review history
+- **Deck and tag hierarchy** — `Science::Chemistry` and `aws::s3` with prefix filtering
+- **SQLite storage** — single file, SQL-queryable
+
+## Anki Compatibility
+
+Import handles the common card types: **Basic**, **Basic (and reversed)**, and **Cloze** deletions. Suspended cards, deck hierarchy, and tags are preserved.
+
+This is not a full Anki reimplementation. Things that are **not supported**: media files (images/audio are stripped to text), templates with JavaScript or conditional sections, nested cloze deletions, and scheduling data (imported cards start fresh with FSRS). Export writes basic two-field cards only.
+
+Re-importing the same `.apkg` updates existing cards rather than creating duplicates.
 
 ## MCP Server
 
-An MCP server exposes all 20 spacedrep operations as tools for AI agents (Claude Code, Claude Desktop, etc.) over the MCP protocol.
+An MCP server exposes spacedrep as tools for AI agents. Once connected, you can ask an agent to:
+
+- "Quiz me on my AWS deck" — it calls `get_next_card`, shows the question, evaluates your answer, and calls `submit_review`
+- "Make flashcards from these notes" — it calls `add_cards_bulk` with cards it generates from your material
+- "Which cards am I struggling with?" — it calls `list_cards` with the leeches filter and suggests rewrites
 
 ```bash
 pip install spacedrep[mcp]

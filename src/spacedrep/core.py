@@ -3,6 +3,8 @@
 Both CLI and (future) MCP call these functions. No CLI or MCP dependencies.
 """
 
+import hashlib
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,6 +19,7 @@ from spacedrep.models import (
     CardListResult,
     CardRecord,
     CardSource,
+    ClozeAddResult,
     DeckInfo,
     DueCount,
     FsrsStatus,
@@ -120,6 +123,27 @@ class BulkInputError(SpacedrepError):
         )
 
 
+class NoClozeMarkersError(SpacedrepError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="no_cloze_markers",
+            message="Text must contain at least one cloze marker: {{c1::answer}}",
+            suggestion="Use {{c1::answer}} syntax for cloze deletions",
+            exit_code=2,
+        )
+
+
+class NotAClozeNoteError(SpacedrepError):
+    def __init__(self, card_id: int) -> None:
+        super().__init__(
+            error_code="not_a_cloze_note",
+            message=f"Card {card_id} is not part of a cloze note",
+            suggestion="Use update_card for standalone cards",
+            exit_code=2,
+            card_id=card_id,
+        )
+
+
 class OptimizerNotInstalledError(SpacedrepError):
     def __init__(self) -> None:
         super().__init__(
@@ -196,11 +220,12 @@ def get_next_card(
     deck: str | None = None,
     tags: list[str] | None = None,
     state: str | None = None,
+    search: str | None = None,
 ) -> CardDue | None:
     """Get the next due card for review, with optional filters."""
     _validate_state(state)
     with _open_db(db_path) as conn:
-        return db.get_next_due_card(conn, deck=deck, tags=tags, state=state)
+        return db.get_next_due_card(conn, deck=deck, tags=tags, state=state, search=search)
 
 
 def get_next_due_time(db_path: Path) -> str | None:
@@ -289,17 +314,135 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
         created: list[int] = []
         for card_input in cards:
             deck_id = db.upsert_deck(conn, card_input.deck)
-            card = CardRecord(
-                deck_id=deck_id,
-                question=card_input.question,
-                answer=card_input.answer,
-                tags=card_input.tags,
-                source="manual",
-            )
-            card_id, _ = db.insert_card(conn, card)
-            created.append(card_id)
+            if card_input.type == "cloze":
+                note_id = _cloze_note_id(card_input.question)
+                card_ids = _expand_cloze(
+                    conn, card_input.question, deck_id, card_input.tags, note_id
+                )
+                created.extend(card_ids)
+            else:
+                card = CardRecord(
+                    deck_id=deck_id,
+                    question=card_input.question,
+                    answer=card_input.answer,
+                    tags=card_input.tags,
+                    source="manual",
+                )
+                card_id, _ = db.insert_card(conn, card)
+                created.append(card_id)
         conn.commit()
         return BulkAddResult(created=created, count=len(created))
+
+
+_CLOZE_PATTERN = re.compile(r"\{\{c(\d+)::")
+
+
+def _cloze_note_id(text: str) -> int:
+    """Generate a deterministic source_note_id from cloze text."""
+    return int(hashlib.sha256(text.encode()).hexdigest()[:15], 16)
+
+
+def _expand_cloze(
+    conn: sqlite3.Connection,
+    text: str,
+    deck_id: int,
+    tags: str,
+    source_note_id: int,
+) -> list[int]:
+    """Expand cloze text into N cards. Returns list of card IDs."""
+    from spacedrep.apkg_reader import render_cloze
+
+    cloze_nums = sorted({int(m) for m in _CLOZE_PATTERN.findall(text)})
+    if not cloze_nums:
+        raise NoClozeMarkersError()
+
+    card_ids: list[int] = []
+    ordinals: set[int] = set()
+    for num in cloze_nums:
+        card_ord = num - 1
+        ordinals.add(card_ord)
+        question, answer = render_cloze(text, card_ord)
+        card = CardRecord(
+            deck_id=deck_id,
+            question=question,
+            answer=answer,
+            extra_fields={"_cloze_source": text},
+            tags=tags,
+            source="generated",
+            source_note_id=source_note_id,
+            source_card_ord=card_ord,
+        )
+        card_id, _ = db.insert_card(conn, card)
+        card_ids.append(card_id)
+
+    # Orphan cleanup: delete cards from this note with ordinals not in the new set
+    existing = conn.execute(
+        "SELECT id, source_card_ord FROM cards WHERE source_note_id = ?",
+        (source_note_id,),
+    ).fetchall()
+    for row in existing:
+        if row["source_card_ord"] not in ordinals:
+            db.delete_card(conn, row["id"])
+
+    return card_ids
+
+
+def add_cloze_note(
+    db_path: Path,
+    text: str,
+    deck: str = "Default",
+    tags: str = "",
+) -> ClozeAddResult:
+    """Add a cloze deletion note that expands into multiple flashcards."""
+    if not _CLOZE_PATTERN.search(text):
+        raise NoClozeMarkersError()
+
+    note_id = _cloze_note_id(text)
+    with _open_db(db_path) as conn:
+        deck_id = db.upsert_deck(conn, deck)
+        card_ids = _expand_cloze(conn, text, deck_id, tags, note_id)
+        conn.commit()
+        return ClozeAddResult(
+            note_id=note_id, card_ids=card_ids, card_count=len(card_ids), deck=deck
+        )
+
+
+def update_cloze_note(
+    db_path: Path,
+    card_id: int,
+    text: str,
+    tags: str | None = None,
+) -> ClozeAddResult:
+    """Update a cloze note by providing any card ID from the note."""
+    if not _CLOZE_PATTERN.search(text):
+        raise NoClozeMarkersError()
+
+    with _open_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT source_note_id, tags, deck_id FROM cards WHERE id = ?",
+            (card_id,),
+        ).fetchone()
+        if row is None:
+            raise CardNotFoundError(card_id)
+        if row["source_note_id"] is None:
+            raise NotAClozeNoteError(card_id)
+
+        source_note_id: int = row["source_note_id"]
+        effective_tags = tags if tags is not None else row["tags"]
+        deck_id: int = row["deck_id"]
+
+        # Resolve deck name for the result
+        deck_row = conn.execute("SELECT name FROM decks WHERE id = ?", (deck_id,)).fetchone()
+        deck_name: str = deck_row["name"] if deck_row else "Default"
+
+        card_ids = _expand_cloze(conn, text, deck_id, effective_tags, source_note_id)
+        conn.commit()
+        return ClozeAddResult(
+            note_id=source_note_id,
+            card_ids=card_ids,
+            card_count=len(card_ids),
+            deck=deck_name,
+        )
 
 
 def list_cards(
@@ -309,6 +452,9 @@ def list_cards(
     tags: list[str] | None = None,
     state: str | None = None,
     leeches_only: bool = False,
+    search: str | None = None,
+    suspended: bool | None = None,
+    source: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> CardListResult:
@@ -322,6 +468,9 @@ def list_cards(
             tags=tags,
             state=state,
             leech_threshold=leech_threshold,
+            search=search,
+            suspended=suspended,
+            source=source,
             limit=limit,
             offset=offset,
         )

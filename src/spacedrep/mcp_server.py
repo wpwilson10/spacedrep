@@ -143,13 +143,15 @@ def add_cards_bulk(
     cards_json: Annotated[
         str,
         Field(
-            description='JSON array: [{"question":"...","answer":"...","deck":"...","tags":"..."}]'
+            description="JSON array of card objects. "
+            'Basic: {"question":"...","answer":"...","deck":"...","tags":"..."}. '
+            'Cloze: {"question":"{{c1::...}}","type":"cloze","deck":"...","tags":"..."}.'
         ),
     ],
 ) -> dict[str, Any]:
-    """Add multiple flashcards in one transaction. Pass a JSON array string of
-    objects with keys: question, answer, deck (optional), tags (optional).
-    Example: '[{"question":"Q1","answer":"A1","deck":"AWS"}]'"""
+    """Add multiple flashcards in one transaction. Each object has: question,
+    answer, deck (optional), tags (optional), type (optional: 'basic' or 'cloze').
+    When type='cloze', question contains cloze text and answer is ignored."""
     from pydantic import TypeAdapter, ValidationError
 
     try:
@@ -161,20 +163,66 @@ def add_cards_bulk(
 
 @mcp.tool()
 @_handle_errors
+def add_cloze_note(
+    text: Annotated[
+        str,
+        Field(
+            description="Cloze text with {{c1::answer}} syntax. "
+            "Each cloze number creates one card. "
+            "Example: '{{c1::Ottawa}} is capital of {{c2::Canada}}' creates 2 cards."
+        ),
+    ],
+    deck: Annotated[str, Field(description="Deck name (created if new)")] = "Default",
+    tags: Annotated[str, Field(description="Space-separated tag names")] = "",
+) -> dict[str, Any]:
+    """Add a cloze deletion note that expands into multiple flashcards.
+    Use {{c1::answer}} syntax. Each cloze number creates one card.
+    Example: '{{c1::Ottawa}} is capital of {{c2::Canada}}' creates 2 cards."""
+    return _serialize(core.add_cloze_note(_db_path(), text, deck=deck, tags=tags))
+
+
+@mcp.tool()
+@_handle_errors
+def update_cloze_note(
+    card_id: Annotated[int, Field(description="Any card ID from the cloze note to update")],
+    text: Annotated[
+        str,
+        Field(
+            description="New cloze text with {{c1::answer}} syntax. "
+            "Cards for removed cloze numbers are deleted. "
+            "Cards for existing ordinals keep their review history."
+        ),
+    ],
+    tags: Annotated[
+        str, Field(description="New space-separated tags (empty to keep existing)")
+    ] = "",
+) -> dict[str, Any]:
+    """Update a cloze note's text by providing any card ID from it. Cards for
+    ordinals that still exist keep their FSRS state and review history. New
+    ordinals get new cards. Removed ordinals are deleted."""
+    return _serialize(core.update_cloze_note(_db_path(), card_id, text, tags=_or_none(tags)))
+
+
+@mcp.tool()
+@_handle_errors
 def get_next_card(
     deck: Annotated[str, Field(description="Deck name to filter by (includes :: sub-decks)")] = "",
     tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
+    search: Annotated[
+        str, Field(description="Search text in question, answer, and extra fields")
+    ] = "",
 ) -> dict[str, Any]:
     """Get the next flashcard due for review. Use at the start of a study session.
-    Filter by deck name (includes :: sub-decks), space-separated tags, or state.
-    Tag filter matches the tag and all children (e.g. 'foundations' matches 'foundations::rag').
-    Returns card details or a message if no cards are due."""
+    Filter by deck name (includes :: sub-decks), space-separated tags, state, or
+    search text. Tag filter matches the tag and all children (e.g. 'foundations'
+    matches 'foundations::rag'). Returns card details or a message if no cards are due."""
     result = core.get_next_card(
         _db_path(),
         deck=_or_none(deck),
         tags=_parse_tags(tags),
         state=_or_none(state),
+        search=_or_none(search),
     )
     if result is None:
         next_due = core.get_next_due_time(_db_path())
@@ -188,20 +236,36 @@ def list_cards(
     deck: Annotated[str, Field(description="Deck name to filter by (includes :: sub-decks)")] = "",
     tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
+    search: Annotated[
+        str, Field(description="Search text in question, answer, and extra fields")
+    ] = "",
     leeches_only: Annotated[bool, Field(description="Only show leech cards (8+ lapses)")] = False,
+    suspended: Annotated[
+        str, Field(description="Filter by suspended: 'true', 'false', or '' for all")
+    ] = "",
+    source: Annotated[str, Field(description="Filter by source: apkg, manual, or generated")] = "",
     limit: Annotated[int, Field(description="Max cards to return")] = 50,
     offset: Annotated[int, Field(description="Skip this many cards (for pagination)")] = 0,
 ) -> dict[str, Any]:
     """List flashcards with optional filters and pagination. Use to browse or
-    search cards. Filter by deck (includes :: sub-decks), tags, state, or leeches.
-    Tag filter matches the tag and all children (e.g. 'foundations' matches 'foundations::rag')."""
+    search cards. Filter by deck (includes :: sub-decks), tags, state, search text,
+    suspended status, source, or leeches. Tag filter matches the tag and all
+    children (e.g. 'foundations' matches 'foundations::rag')."""
+    suspended_bool: bool | None = None
+    if suspended == "true":
+        suspended_bool = True
+    elif suspended == "false":
+        suspended_bool = False
     return _serialize(
         core.list_cards(
             _db_path(),
             deck=_or_none(deck),
             tags=_parse_tags(tags),
             state=_or_none(state),
+            search=_or_none(search),
             leeches_only=leeches_only,
+            suspended=suspended_bool,
+            source=_or_none(source),
             limit=limit,
             offset=offset,
         )

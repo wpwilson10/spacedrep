@@ -29,6 +29,9 @@ def next_card(
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"
     ),
+    search: str | None = typer.Option(
+        None, "--search", "-s", help="Search text in question, answer, and extra fields"
+    ),
     quiet: bool = QUIET_OPT,
     db: Path = DB_DEFAULT,
 ) -> None:
@@ -38,11 +41,12 @@ def next_card(
         spacedrep card next
         spacedrep card next --deck AWS --tags "s3 storage"
         spacedrep card next --state new
+        spacedrep card next --search Lambda
         spacedrep card next -q
     """
     try:
         tags_list = _parse_tags(tags)
-        result = core.get_next_card(db, deck=deck, tags=tags_list, state=state)
+        result = core.get_next_card(db, deck=deck, tags=tags_list, state=state, search=search)
         if result is None:
             if quiet:
                 return
@@ -126,7 +130,12 @@ def list_cards(
     state: str | None = typer.Option(
         None, help="Filter by state: new, learning, review, relearning"
     ),
+    search: str | None = typer.Option(
+        None, "--search", "-s", help="Search text in question, answer, and extra fields"
+    ),
     leeches: bool = typer.Option(False, "--leeches", help="Show only leech cards"),
+    suspended: bool | None = typer.Option(None, help="Filter by suspended status"),
+    source: str | None = typer.Option(None, help="Filter by source: apkg, manual, generated"),
     limit: int = typer.Option(50, help="Max cards to return"),
     offset: int = typer.Option(0, help="Offset for pagination"),
     quiet: bool = QUIET_OPT,
@@ -146,6 +155,9 @@ def list_cards(
             tags=tags_list,
             state=state,
             leeches_only=leeches,
+            search=search,
+            suspended=suspended,
+            source=source,
             limit=limit,
             offset=offset,
         )
@@ -300,6 +312,54 @@ def unsuspend(
         result = core.unsuspend_card(db, card_id, dry_run=dry_run)
         if quiet and not dry_run:
             output_quiet(result["card_id"])
+        else:
+            output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
+@card_app.command("add-cloze")
+def add_cloze(
+    text: str = typer.Argument(..., help="Cloze text with {{c1::answer}} syntax"),
+    deck: str = typer.Option("Default", help="Deck name"),
+    tags: str = typer.Option("", help="Space-separated tags"),
+    quiet: bool = QUIET_OPT,
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Add a cloze deletion note that expands into multiple flashcards.
+
+    Example:
+        spacedrep card add-cloze "{{c1::Ottawa}} is the capital of {{c2::Canada}}" --deck Geo
+    """
+    try:
+        result = core.add_cloze_note(db, text, deck=deck, tags=tags)
+        if quiet:
+            output_quiet(result.card_ids)
+        else:
+            output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
+@card_app.command("update-cloze")
+def update_cloze(
+    card_id: int = typer.Argument(..., help="Any card ID from the cloze note"),
+    text: str = typer.Argument(..., help="New cloze text with {{c1::answer}} syntax"),
+    tags: str | None = typer.Option(None, help="New space-separated tags (omit to keep existing)"),
+    quiet: bool = QUIET_OPT,
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Update a cloze note by providing any card ID from it.
+
+    Example:
+        spacedrep card update-cloze 42 "{{c1::Ottawa}} is in {{c2::Canada}}, {{c3::North America}}"
+    """
+    try:
+        result = core.update_cloze_note(db, card_id, text, tags=tags)
+        if quiet:
+            output_quiet(result.card_ids)
         else:
             output_json(result)
     except core.SpacedrepError as e:

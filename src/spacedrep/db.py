@@ -158,6 +158,9 @@ def _build_card_filter_clauses(
     tags: list[str] | None = None,
     state: str | None = None,
     leech_threshold: int | None = None,
+    search: str | None = None,
+    suspended: bool | None = None,
+    source: str | None = None,
 ) -> tuple[str, list[str | int]]:
     """Build SQL WHERE fragments for card filtering.
 
@@ -197,6 +200,24 @@ def _build_card_filter_clauses(
     if leech_threshold is not None:
         clauses.append("AND fs.lapse_count >= ?")
         params.append(leech_threshold)
+
+    if search is not None:
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_param = f"%{escaped}%"
+        clauses.append(
+            "AND (c.question LIKE ? ESCAPE '\\' "
+            "OR c.answer LIKE ? ESCAPE '\\' "
+            "OR c.extra_fields LIKE ? ESCAPE '\\')"
+        )
+        params.extend([like_param, like_param, like_param])
+
+    if suspended is not None:
+        clauses.append("AND c.suspended = ?")
+        params.append(int(suspended))
+
+    if source is not None:
+        clauses.append("AND c.source = ?")
+        params.append(source)
 
     return (" ".join(clauses), params)
 
@@ -308,9 +329,12 @@ def get_next_due_card(
     deck: str | None = None,
     tags: list[str] | None = None,
     state: str | None = None,
+    search: str | None = None,
 ) -> CardDue | None:
     """Get the next due card, optionally filtered. Returns None when nothing is due."""
-    filter_sql, filter_params = _build_card_filter_clauses(deck=deck, tags=tags, state=state)
+    filter_sql, filter_params = _build_card_filter_clauses(
+        deck=deck, tags=tags, state=state, search=search
+    )
     query = f"""
         SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
                c.tags, c.extra_fields,
@@ -351,12 +375,21 @@ def list_cards(
     tags: list[str] | None = None,
     state: str | None = None,
     leech_threshold: int | None = None,
+    search: str | None = None,
+    suspended: bool | None = None,
+    source: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> CardListResult:
     """List cards with optional filters, paginated."""
     filter_sql, filter_params = _build_card_filter_clauses(
-        deck=deck, tags=tags, state=state, leech_threshold=leech_threshold
+        deck=deck,
+        tags=tags,
+        state=state,
+        leech_threshold=leech_threshold,
+        search=search,
+        suspended=suspended,
+        source=source,
     )
 
     count_query = f"""

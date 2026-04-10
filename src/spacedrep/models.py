@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 CardSource = Literal["apkg", "manual", "generated"]
 
@@ -154,9 +154,26 @@ class BulkCardInput(BaseModel):
     """Input for bulk card creation."""
 
     question: str
-    answer: str
+    answer: str = ""
     deck: str = "Default"
     tags: str = ""
+    type: Literal["basic", "cloze"] = "basic"
+
+    @model_validator(mode="after")
+    def _validate_answer_for_basic(self) -> "BulkCardInput":
+        if self.type == "basic" and not self.answer:
+            msg = "Basic cards require a non-empty answer"
+            raise ValueError(msg)
+        return self
+
+
+class ClozeAddResult(BaseModel):
+    """Result of cloze note creation."""
+
+    note_id: int
+    card_ids: list[int]
+    card_count: int
+    deck: str
 
 
 class BulkAddResult(BaseModel):

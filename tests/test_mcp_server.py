@@ -468,7 +468,7 @@ class TestOptimizeFsrs:
 # ---------------------------------------------------------------------------
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean"}
-EXPECTED_TOOL_COUNT = 21
+EXPECTED_TOOL_COUNT = 23
 
 
 def _get_tools() -> dict[str, object]:

@@ -533,3 +533,232 @@ def test_import_dry_run_multi_card(tmp_db: Path, mixed_apkg: Path) -> None:
     assert result.updated == 0
     # No cards actually written
     assert core.list_cards(tmp_db).total == 0
+
+
+# --- Cloze creation tests ---
+
+
+class TestAddClozeNote:
+    def test_single_cloze(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c1::Ottawa}} is a city")
+        assert result.card_count == 1
+        assert len(result.card_ids) == 1
+        assert result.deck == "Default"
+
+    def test_multi_cloze(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(
+            tmp_db, "{{c1::Ottawa}} is the capital of {{c2::Canada}}", deck="Geo"
+        )
+        assert result.card_count == 2
+        assert len(result.card_ids) == 2
+        assert result.deck == "Geo"
+
+    def test_cloze_card_content(self, tmp_db: Path) -> None:
+        core.add_cloze_note(tmp_db, "{{c1::Ottawa}} is the capital of {{c2::Canada}}")
+        cards = core.list_cards(tmp_db)
+        questions = sorted(c.question for c in cards.cards)
+        assert "[...]" in questions[0]  # one card blanks Ottawa
+        assert "[...]" in questions[1]  # other card blanks Canada
+
+    def test_cloze_with_hint(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c1::Ottawa::capital}} is in Canada")
+        assert result.card_count == 1
+        detail = core.get_card_detail(tmp_db, result.card_ids[0])
+        assert "[capital]" in detail.question
+
+    def test_same_number_multiple_blanks(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c1::A}} and {{c1::B}} are letters")
+        assert result.card_count == 1  # same cloze number → 1 card
+
+    def test_no_markers_raises(self, tmp_db: Path) -> None:
+        with pytest.raises(core.NoClozeMarkersError):
+            core.add_cloze_note(tmp_db, "No cloze markers here")
+
+    def test_dedup_resubmit(self, tmp_db: Path) -> None:
+        text = "{{c1::Ottawa}} is the capital of {{c2::Canada}}"
+        first = core.add_cloze_note(tmp_db, text)
+        second = core.add_cloze_note(tmp_db, text)
+        assert first.card_ids == second.card_ids
+        assert core.list_cards(tmp_db).total == 2  # no duplicates
+
+    def test_orphan_cleanup(self, tmp_db: Path) -> None:
+        text_v1 = "{{c1::A}} and {{c2::B}} and {{c3::C}}"
+        result_v1 = core.add_cloze_note(tmp_db, text_v1)
+        assert result_v1.card_count == 3
+
+        # Re-submit with fewer cloze numbers using update
+        core.update_cloze_note(tmp_db, result_v1.card_ids[0], "{{c1::A}} and {{c2::B}}")
+        assert core.list_cards(tmp_db).total == 2  # c3 card deleted
+
+    def test_tags_applied(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c1::test}}", tags="geo canada")
+        detail = core.get_card_detail(tmp_db, result.card_ids[0])
+        assert detail.tags == "geo canada"
+
+    def test_extra_fields_stores_source(self, tmp_db: Path) -> None:
+        text = "{{c1::Ottawa}} is a city"
+        result = core.add_cloze_note(tmp_db, text)
+        detail = core.get_card_detail(tmp_db, result.card_ids[0])
+        assert detail.extra_fields.get("_cloze_source") == text
+
+
+class TestUpdateClozeNote:
+    def test_update_preserves_ids(self, tmp_db: Path) -> None:
+        original = core.add_cloze_note(tmp_db, "{{c1::A}} and {{c2::B}}")
+        updated = core.update_cloze_note(tmp_db, original.card_ids[0], "{{c1::X}} and {{c2::Y}}")
+        assert updated.card_ids == original.card_ids
+        assert updated.note_id == original.note_id
+
+    def test_update_adds_new_ordinals(self, tmp_db: Path) -> None:
+        original = core.add_cloze_note(tmp_db, "{{c1::A}}")
+        updated = core.update_cloze_note(tmp_db, original.card_ids[0], "{{c1::A}} and {{c2::B}}")
+        assert updated.card_count == 2
+
+    def test_update_removes_ordinals(self, tmp_db: Path) -> None:
+        original = core.add_cloze_note(tmp_db, "{{c1::A}} and {{c2::B}}")
+        updated = core.update_cloze_note(tmp_db, original.card_ids[0], "{{c1::A}}")
+        assert updated.card_count == 1
+
+    def test_update_tags_none_preserves(self, tmp_db: Path) -> None:
+        original = core.add_cloze_note(tmp_db, "{{c1::A}}", tags="original_tag")
+        core.update_cloze_note(tmp_db, original.card_ids[0], "{{c1::B}}", tags=None)
+        detail = core.get_card_detail(tmp_db, original.card_ids[0])
+        assert detail.tags == "original_tag"
+
+    def test_update_tags_changes(self, tmp_db: Path) -> None:
+        original = core.add_cloze_note(tmp_db, "{{c1::A}}", tags="old")
+        core.update_cloze_note(tmp_db, original.card_ids[0], "{{c1::B}}", tags="new")
+        detail = core.get_card_detail(tmp_db, original.card_ids[0])
+        assert detail.tags == "new"
+
+    def test_update_not_cloze_raises(self, tmp_db: Path) -> None:
+        result = core.add_card(tmp_db, "Q", "A")
+        card_id = int(result["card_id"])
+        with pytest.raises(core.NotAClozeNoteError):
+            core.update_cloze_note(tmp_db, card_id, "{{c1::X}}")
+
+    def test_update_card_not_found_raises(self, tmp_db: Path) -> None:
+        with pytest.raises(core.CardNotFoundError):
+            core.update_cloze_note(tmp_db, 99999, "{{c1::X}}")
+
+    def test_update_no_markers_raises(self, tmp_db: Path) -> None:
+        original = core.add_cloze_note(tmp_db, "{{c1::A}}")
+        with pytest.raises(core.NoClozeMarkersError):
+            core.update_cloze_note(tmp_db, original.card_ids[0], "no markers")
+
+
+class TestBulkMixed:
+    def test_mixed_basic_and_cloze(self, tmp_db: Path) -> None:
+        from spacedrep.models import BulkCardInput
+
+        cards = [
+            BulkCardInput(question="Q1", answer="A1", type="basic"),
+            BulkCardInput(
+                question="{{c1::Ottawa}} is the capital of {{c2::Canada}}",
+                type="cloze",
+            ),
+        ]
+        result = core.add_cards_bulk(tmp_db, cards)
+        assert result.count == 3  # 1 basic + 2 cloze cards
+
+    def test_basic_empty_answer_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from spacedrep.models import BulkCardInput
+
+        with pytest.raises(ValidationError):
+            BulkCardInput(question="Q", answer="", type="basic")
+
+    def test_cloze_empty_answer_allowed(self) -> None:
+        from spacedrep.models import BulkCardInput
+
+        card = BulkCardInput(question="{{c1::X}}", type="cloze")
+        assert card.answer == ""
+
+
+# --- Search and filter tests ---
+
+
+class TestSearchFilter:
+    def test_search_matches_question(self, populated_db: Path) -> None:
+        result = core.list_cards(populated_db, search="CAP theorem")
+        assert result.total == 1
+
+    def test_search_matches_answer(self, populated_db: Path) -> None:
+        result = core.list_cards(populated_db, search="archival storage")
+        assert result.total == 1
+
+    def test_search_case_insensitive(self, populated_db: Path) -> None:
+        result = core.list_cards(populated_db, search="cap theorem")
+        assert result.total == 1
+
+    def test_search_composes_with_deck(self, populated_db_multi_deck: Path) -> None:
+        result = core.list_cards(populated_db_multi_deck, search="Lambda", deck="AWS")
+        assert result.total == 1
+
+    def test_search_no_matches(self, populated_db: Path) -> None:
+        result = core.list_cards(populated_db, search="nonexistent_term_xyz")
+        assert result.total == 0
+
+    def test_search_wildcards_escaped(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "100% correct", "answer")
+        core.add_card(tmp_db, "other card", "other answer")
+        # '%' in search should be treated as literal
+        result = core.list_cards(tmp_db, search="100%")
+        assert result.total == 1
+
+    def test_search_in_get_next_card(self, populated_db_multi_deck: Path) -> None:
+        result = core.get_next_card(populated_db_multi_deck, search="Lambda")
+        assert result is not None
+        assert "Lambda" in result.question
+
+    def test_search_extra_fields(self, tmp_db: Path) -> None:
+        text = "{{c1::Ottawa}} is a city"
+        core.add_cloze_note(tmp_db, text)
+        # _cloze_source is stored in extra_fields — search should find it
+        result = core.list_cards(tmp_db, search="_cloze_source")
+        assert result.total == 1
+
+
+class TestSuspendedFilter:
+    def test_suspended_true(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "Q1", "A1")
+        result = core.add_card(tmp_db, "Q2", "A2")
+        core.suspend_card(tmp_db, int(result["card_id"]))
+
+        suspended = core.list_cards(tmp_db, suspended=True)
+        assert suspended.total == 1
+
+    def test_suspended_false(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "Q1", "A1")
+        result = core.add_card(tmp_db, "Q2", "A2")
+        core.suspend_card(tmp_db, int(result["card_id"]))
+
+        active = core.list_cards(tmp_db, suspended=False)
+        assert active.total == 1
+
+    def test_suspended_none_returns_all(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "Q1", "A1")
+        result = core.add_card(tmp_db, "Q2", "A2")
+        core.suspend_card(tmp_db, int(result["card_id"]))
+
+        all_cards = core.list_cards(tmp_db)
+        assert all_cards.total == 2
+
+
+class TestSourceFilter:
+    def test_source_manual(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "Q", "A")
+        result = core.list_cards(tmp_db, source="manual")
+        assert result.total == 1
+
+    def test_source_generated(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "Q", "A")
+        core.add_cloze_note(tmp_db, "{{c1::test}}")
+        result = core.list_cards(tmp_db, source="generated")
+        assert result.total == 1
+
+    def test_source_no_match(self, tmp_db: Path) -> None:
+        core.add_card(tmp_db, "Q", "A")
+        result = core.list_cards(tmp_db, source="apkg")
+        assert result.total == 0

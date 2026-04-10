@@ -601,6 +601,18 @@ class TestAddClozeNote:
         detail = core.get_card_detail(tmp_db, result.card_ids[0])
         assert detail.extra_fields.get("_cloze_source") == text
 
+    def test_empty_cloze_content_raises(self, tmp_db: Path) -> None:
+        with pytest.raises(core.NoClozeMarkersError):
+            core.add_cloze_note(tmp_db, "{{c1::}}")
+
+    def test_c0_only_raises(self, tmp_db: Path) -> None:
+        with pytest.raises(core.NoClozeMarkersError):
+            core.add_cloze_note(tmp_db, "{{c0::zero}}")
+
+    def test_c0_ignored_when_valid_markers_exist(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c0::zero}} and {{c1::real}}")
+        assert result.card_count == 1  # only c1 creates a card
+
 
 class TestUpdateClozeNote:
     def test_update_preserves_ids(self, tmp_db: Path) -> None:
@@ -762,3 +774,54 @@ class TestSourceFilter:
         core.add_card(tmp_db, "Q", "A")
         result = core.list_cards(tmp_db, source="apkg")
         assert result.total == 0
+
+
+# --- Cloze preserves suspended ---
+
+
+class TestClozePreservesSuspended:
+    def test_update_cloze_preserves_suspended(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c1::A}} and {{c2::B}}")
+        core.suspend_card(tmp_db, result.card_ids[0])
+        core.update_cloze_note(tmp_db, result.card_ids[1], "{{c1::X}} and {{c2::Y}}")
+        detail = core.get_card_detail(tmp_db, result.card_ids[0])
+        assert detail.suspended is True
+
+    def test_add_cloze_idempotent_preserves_suspended(self, tmp_db: Path) -> None:
+        text = "{{c1::A}} and {{c2::B}}"
+        result = core.add_cloze_note(tmp_db, text)
+        core.suspend_card(tmp_db, result.card_ids[0])
+        # Re-add same text (idempotent path)
+        core.add_cloze_note(tmp_db, text)
+        detail = core.get_card_detail(tmp_db, result.card_ids[0])
+        assert detail.suspended is True
+
+    def test_new_cloze_ordinal_not_suspended(self, tmp_db: Path) -> None:
+        result = core.add_cloze_note(tmp_db, "{{c1::A}}")
+        core.suspend_card(tmp_db, result.card_ids[0])
+        updated = core.update_cloze_note(tmp_db, result.card_ids[0], "{{c1::A}} and {{c2::B}}")
+        # Existing card stays suspended
+        detail_c1 = core.get_card_detail(tmp_db, updated.card_ids[0])
+        assert detail_c1.suspended is True
+        # New ordinal is not suspended
+        detail_c2 = core.get_card_detail(tmp_db, updated.card_ids[1])
+        assert detail_c2.suspended is False
+
+
+# --- Multi-tag OR filter tests ---
+
+
+def test_list_cards_multi_tag_or(populated_db_multi_deck: Path) -> None:
+    """Multiple tags use OR logic: cards matching ANY tag are returned."""
+    result = core.list_cards(populated_db_multi_deck, tags=["trees", "s3"])
+    assert result.total >= 2
+    tag_sets = [c.tags for c in result.cards]
+    assert any("trees" in t for t in tag_sets)
+    assert any("s3" in t for t in tag_sets)
+
+
+def test_get_next_card_multi_tag_or(populated_db_multi_deck: Path) -> None:
+    """get_next_card with multiple tags returns a card matching any tag."""
+    result = core.get_next_card(populated_db_multi_deck, tags=["trees", "s3"])
+    assert result is not None
+    assert "trees" in result.tags or "s3" in result.tags

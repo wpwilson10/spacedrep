@@ -127,8 +127,11 @@ class NoClozeMarkersError(SpacedrepError):
     def __init__(self) -> None:
         super().__init__(
             error_code="no_cloze_markers",
-            message="Text must contain at least one cloze marker: {{c1::answer}}",
-            suggestion="Use {{c1::answer}} syntax for cloze deletions",
+            message=(
+                "Text must contain at least one cloze marker"
+                " with non-empty content, e.g. {{c1::answer}}"
+            ),
+            suggestion="Use {{c1::answer}} syntax. Content cannot be empty.",
             exit_code=2,
         )
 
@@ -334,7 +337,7 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
         return BulkAddResult(created=created, count=len(created))
 
 
-_CLOZE_PATTERN = re.compile(r"\{\{c(\d+)::")
+_CLOZE_PATTERN = re.compile(r"\{\{c(\d+)::(.+?)(?:::.*?)?\}\}", re.DOTALL)
 
 
 def _cloze_note_id(text: str) -> int:
@@ -352,7 +355,7 @@ def _expand_cloze(
     """Expand cloze text into N cards. Returns list of card IDs."""
     from spacedrep.apkg_reader import render_cloze
 
-    cloze_nums = sorted({int(m) for m in _CLOZE_PATTERN.findall(text)})
+    cloze_nums = sorted({int(m[0]) for m in _CLOZE_PATTERN.findall(text) if int(m[0]) >= 1})
     if not cloze_nums:
         raise NoClozeMarkersError()
 
@@ -362,6 +365,14 @@ def _expand_cloze(
         card_ord = num - 1
         ordinals.add(card_ord)
         question, answer = render_cloze(text, card_ord)
+
+        # Preserve suspended status for existing cards (e.g. leech auto-suspend)
+        existing_row = conn.execute(
+            "SELECT suspended FROM cards WHERE source_note_id = ? AND source_card_ord = ?",
+            (source_note_id, card_ord),
+        ).fetchone()
+        is_suspended = bool(existing_row["suspended"]) if existing_row else False
+
         card = CardRecord(
             deck_id=deck_id,
             question=question,
@@ -371,6 +382,7 @@ def _expand_cloze(
             source="generated",
             source_note_id=source_note_id,
             source_card_ord=card_ord,
+            suspended=is_suspended,
         )
         card_id, _ = db.insert_card(conn, card)
         card_ids.append(card_id)

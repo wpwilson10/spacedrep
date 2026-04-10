@@ -73,7 +73,7 @@ def _serialize(data: BaseModel | dict[str, object]) -> dict[str, object]:
 
 def _or_none(val: str) -> str | None:
     """Convert empty string sentinel to None."""
-    return val if val else None
+    return val.strip() or None
 
 
 def _parse_tags(tags: str) -> list[str] | None:
@@ -177,7 +177,9 @@ def add_cloze_note(
 ) -> dict[str, Any]:
     """Add a cloze deletion note that expands into multiple flashcards.
     Use {{c1::answer}} syntax. Each cloze number creates one card.
-    Example: '{{c1::Ottawa}} is capital of {{c2::Canada}}' creates 2 cards."""
+    Example: '{{c1::Ottawa}} is capital of {{c2::Canada}}' creates 2 cards.
+    To edit an existing cloze note, use update_cloze_note instead -- re-adding
+    changed text creates a new note and leaves old cards as orphans."""
     return _serialize(core.add_cloze_note(_db_path(), text, deck=deck, tags=tags))
 
 
@@ -207,7 +209,7 @@ def update_cloze_note(
 @_handle_errors
 def get_next_card(
     deck: Annotated[str, Field(description="Deck name to filter by (includes :: sub-decks)")] = "",
-    tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
+    tags: Annotated[str, Field(description="Space-separated tags (OR logic, matches any)")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
     search: Annotated[
         str, Field(description="Search text in question, answer, and extra fields")
@@ -234,7 +236,7 @@ def get_next_card(
 @_handle_errors
 def list_cards(
     deck: Annotated[str, Field(description="Deck name to filter by (includes :: sub-decks)")] = "",
-    tags: Annotated[str, Field(description="Space-separated tag names to filter by")] = "",
+    tags: Annotated[str, Field(description="Space-separated tags (OR logic, matches any)")] = "",
     state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
     search: Annotated[
         str, Field(description="Search text in question, answer, and extra fields")

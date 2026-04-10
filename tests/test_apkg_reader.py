@@ -111,6 +111,13 @@ def test_render_cloze_empty_text() -> None:
     assert a == ""
 
 
+def test_render_cloze_empty_content() -> None:
+    """Empty cloze content {{c1::}} doesn't match render regex — passes through unchanged."""
+    q, a = render_cloze("{{c1::}}", 0)
+    assert q == "{{c1::}}"
+    assert a == "{{c1::}}"
+
+
 # --- resolve_template_fields tests ---
 
 _BASIC_REVERSED_TEMPLATES = [

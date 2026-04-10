@@ -16,8 +16,10 @@ from mcp.server.fastmcp.exceptions import ToolError
 from spacedrep import core
 from spacedrep.core import reset_params_loaded
 from spacedrep.mcp_server import (
+    _or_none,  # pyright: ignore[reportPrivateUsage]  # testing internal helper
     add_card,
     add_cards_bulk,
+    add_cloze_note,
     delete_card,
     export_deck,
     get_card,
@@ -37,6 +39,7 @@ from spacedrep.mcp_server import (
     suspend_card,
     unsuspend_card,
     update_card,
+    update_cloze_note,
 )
 
 # All tools read DB_PATH from the module global. We monkeypatch it per test.
@@ -461,6 +464,35 @@ class TestOptimizeFsrs:
         with pytest.raises(ToolError) as exc_info:
             optimize_fsrs()
         assert "optimizer_not_installed" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _or_none tests
+# ---------------------------------------------------------------------------
+
+
+class TestOrNone:
+    def test_empty_string_returns_none(self) -> None:
+        assert _or_none("") is None
+
+    def test_whitespace_returns_none(self) -> None:
+        assert _or_none("   ") is None
+
+    def test_strips_padding(self) -> None:
+        assert _or_none("  hello  ") == "hello"
+
+    def test_normal_value_passes_through(self) -> None:
+        assert _or_none("hello") == "hello"
+
+
+class TestClozeWhitespaceTags:
+    def test_update_cloze_whitespace_tags_preserves(self, tmp_db: Path) -> None:
+        result = add_cloze_note(text="{{c1::A}} and {{c2::B}}", tags="original")
+        card_id = result["card_ids"][0]
+        # Whitespace-only tags should be treated as "keep existing"
+        update_cloze_note(card_id=card_id, text="{{c1::X}} and {{c2::Y}}", tags="   ")
+        detail = get_card(card_id=card_id)
+        assert detail["tags"] == "original"
 
 
 # ---------------------------------------------------------------------------

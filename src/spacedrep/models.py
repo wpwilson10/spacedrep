@@ -163,8 +163,11 @@ class BulkCardInput(BaseModel):
     type: Literal["basic", "cloze"] = "basic"
 
     @model_validator(mode="after")
-    def _validate_answer_for_basic(self) -> "BulkCardInput":
-        if self.type == "basic" and not self.answer:
+    def _validate_fields(self) -> "BulkCardInput":
+        if not self.question.strip():
+            msg = "Question cannot be empty or whitespace-only"
+            raise ValueError(msg)
+        if self.type == "basic" and not self.answer.strip():
             msg = "Basic cards require a non-empty answer"
             raise ValueError(msg)
         return self

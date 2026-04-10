@@ -20,6 +20,7 @@ from spacedrep.mcp_server import (
     add_card,
     add_cards_bulk,
     add_cloze_note,
+    bury_card,
     delete_card,
     export_deck,
     get_card,
@@ -582,3 +583,68 @@ class TestSchemaValidation:
         assert _desc("delete_card", "dry_run") is not None
         # File paths should be described
         assert _desc("import_deck", "apkg_path") is not None
+
+
+# ---------------------------------------------------------------------------
+# Bug fix validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuryCardValidation:
+    def test_negative_hours(self, card_id: int, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="invalid_bury_duration"):
+            bury_card(card_id, hours=-1)
+
+    def test_zero_hours(self, card_id: int, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="invalid_bury_duration"):
+            bury_card(card_id, hours=0)
+
+    def test_valid_hours(self, card_id: int, tmp_db: Path) -> None:
+        result = bury_card(card_id, hours=1)
+        assert result["card_id"] == card_id
+        assert "buried_until" in result
+
+
+class TestAddCardValidation:
+    def test_empty_question(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="empty_field"):
+            add_card("", "A1")
+
+    def test_whitespace_question(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="empty_field"):
+            add_card("   ", "A1")
+
+    def test_empty_answer(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="empty_field"):
+            add_card("Q1", "")
+
+    def test_whitespace_answer(self, tmp_db: Path) -> None:
+        with pytest.raises(ToolError, match="empty_field"):
+            add_card("Q1", "   ")
+
+
+class TestListCardsValidation:
+    def test_negative_limit_clamped(self, card_id: int, tmp_db: Path) -> None:
+        result = list_cards(limit=-1)
+        assert result["limit"] == 1
+
+    def test_negative_offset_clamped(self, card_id: int, tmp_db: Path) -> None:
+        result = list_cards(offset=-5)
+        assert result["offset"] == 0
+
+    def test_excessive_limit_clamped(self, card_id: int, tmp_db: Path) -> None:
+        result = list_cards(limit=10000)
+        assert result["limit"] == 1000
+
+
+class TestSubmitReviewSuspended:
+    def test_review_suspended_card(self, card_id: int, tmp_db: Path) -> None:
+        suspend_card(card_id)
+        with pytest.raises(ToolError, match="card_suspended"):
+            submit_review(card_id, rating=3)
+
+    def test_review_after_unsuspend(self, card_id: int, tmp_db: Path) -> None:
+        suspend_card(card_id)
+        unsuspend_card(card_id)
+        result = submit_review(card_id, rating=3)
+        assert result["rating"] == "good"

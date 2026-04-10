@@ -158,6 +158,39 @@ class OptimizerNotInstalledError(SpacedrepError):
         )
 
 
+class InvalidBuryDurationError(SpacedrepError):
+    def __init__(self, hours: int) -> None:
+        super().__init__(
+            error_code="invalid_bury_duration",
+            message=f"Bury duration must be at least 1 hour, got {hours}",
+            suggestion="Use a positive number of hours (e.g. 24)",
+            exit_code=2,
+            hours=hours,
+        )
+
+
+class EmptyFieldError(SpacedrepError):
+    def __init__(self, field: str) -> None:
+        super().__init__(
+            error_code="empty_field",
+            message=f"Card {field} cannot be empty or whitespace-only",
+            suggestion=f"Provide a non-empty {field} for the card",
+            exit_code=2,
+            field=field,
+        )
+
+
+class CardSuspendedError(SpacedrepError):
+    def __init__(self, card_id: int) -> None:
+        super().__init__(
+            error_code="card_suspended",
+            message=f"Card {card_id} is suspended — reviews have no effect",
+            suggestion="Unsuspend the card first with unsuspend_card, then review it",
+            exit_code=2,
+            card_id=card_id,
+        )
+
+
 # Concurrency note: _params_loaded guards a one-time load of FSRS parameters
 # from the database into the module-level scheduler. This is safe because
 # FastMCP serializes tool calls via asyncio (single-threaded). If concurrency
@@ -254,6 +287,12 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
         if fsrs_card is None:
             raise CardNotFoundError(review.card_id)
 
+        suspended_row = conn.execute(
+            "SELECT suspended FROM cards WHERE id = ?", (review.card_id,)
+        ).fetchone()
+        if suspended_row and suspended_row["suspended"]:
+            raise CardSuspendedError(review.card_id)
+
         # Leech detection: increment lapse count on "again" for Review/Relearning cards
         from fsrs import State
 
@@ -306,6 +345,10 @@ def add_card(
     source: CardSource = "manual",
 ) -> dict[str, int | str | bool]:
     """Add a new card. Re-adding the same question to the same deck updates the existing card."""
+    if not question.strip():
+        raise EmptyFieldError("question")
+    if not answer.strip():
+        raise EmptyFieldError("answer")
     with _open_db(db_path) as conn:
         deck_id = db.upsert_deck(conn, deck)
         note_id = _basic_note_id(question, deck)
@@ -511,6 +554,8 @@ def list_cards(
 ) -> CardListResult:
     """List cards with optional filters, paginated."""
     _validate_state(state)
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
     leech_threshold = LEECH_THRESHOLD if leeches_only else None
     with _open_db(db_path) as conn:
         return db.list_cards(
@@ -698,6 +743,8 @@ def unsuspend_card(db_path: Path, card_id: int, *, dry_run: bool = False) -> dic
 
 def bury_card(db_path: Path, card_id: int, hours: int = 24) -> dict[str, int | str]:
     """Bury a card for a number of hours. Raises CardNotFoundError if not found."""
+    if hours < 1:
+        raise InvalidBuryDurationError(hours)
     from datetime import UTC, datetime, timedelta
 
     until = (datetime.now(UTC) + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")

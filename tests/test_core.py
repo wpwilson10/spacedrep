@@ -889,3 +889,90 @@ def test_get_next_card_multi_tag_or(populated_db_multi_deck: Path) -> None:
     result = core.get_next_card(populated_db_multi_deck, tags=["trees", "s3"])
     assert result is not None
     assert "trees" in result.tags or "s3" in result.tags
+
+
+# --- Bug fix tests: input validation ---
+
+
+def test_bury_card_negative_hours(tmp_db: Path) -> None:
+    """bury_card rejects negative hours."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    with pytest.raises(core.InvalidBuryDurationError):
+        core.bury_card(tmp_db, 1, hours=-1)
+
+
+def test_bury_card_zero_hours(tmp_db: Path) -> None:
+    """bury_card rejects zero hours."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    with pytest.raises(core.InvalidBuryDurationError):
+        core.bury_card(tmp_db, 1, hours=0)
+
+
+def test_bury_card_valid_hours(tmp_db: Path) -> None:
+    """bury_card accepts positive hours."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    result = core.bury_card(tmp_db, 1, hours=1)
+    assert result["card_id"] == 1
+    assert "buried_until" in result
+
+
+def test_add_card_empty_question(tmp_db: Path) -> None:
+    """add_card rejects empty question."""
+    with pytest.raises(core.EmptyFieldError, match="question"):
+        core.add_card(tmp_db, "", "A", deck="Test")
+
+
+def test_add_card_whitespace_question(tmp_db: Path) -> None:
+    """add_card rejects whitespace-only question."""
+    with pytest.raises(core.EmptyFieldError, match="question"):
+        core.add_card(tmp_db, "   ", "A", deck="Test")
+
+
+def test_add_card_empty_answer(tmp_db: Path) -> None:
+    """add_card rejects empty answer."""
+    with pytest.raises(core.EmptyFieldError, match="answer"):
+        core.add_card(tmp_db, "Q", "", deck="Test")
+
+
+def test_add_card_whitespace_answer(tmp_db: Path) -> None:
+    """add_card rejects whitespace-only answer."""
+    with pytest.raises(core.EmptyFieldError, match="answer"):
+        core.add_card(tmp_db, "Q", "   \t\n", deck="Test")
+
+
+def test_list_cards_negative_limit_clamped(populated_db_multi_deck: Path) -> None:
+    """list_cards clamps negative limit to 1."""
+    result = core.list_cards(populated_db_multi_deck, limit=-1)
+    assert result.limit == 1
+    assert len(result.cards) == 1
+
+
+def test_list_cards_negative_offset_clamped(populated_db_multi_deck: Path) -> None:
+    """list_cards clamps negative offset to 0."""
+    result = core.list_cards(populated_db_multi_deck, offset=-5)
+    assert result.offset == 0
+
+
+def test_list_cards_excessive_limit_clamped(populated_db_multi_deck: Path) -> None:
+    """list_cards clamps excessive limit to 1000."""
+    result = core.list_cards(populated_db_multi_deck, limit=10000)
+    assert result.limit == 1000
+
+
+def test_submit_review_suspended_card(tmp_db: Path) -> None:
+    """submit_review rejects reviews on suspended cards."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    core.suspend_card(tmp_db, 1)
+    review = ReviewInput(card_id=1, rating=3)
+    with pytest.raises(core.CardSuspendedError):
+        core.submit_review(tmp_db, review)
+
+
+def test_submit_review_after_unsuspend(tmp_db: Path) -> None:
+    """submit_review works after unsuspending a card."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    core.suspend_card(tmp_db, 1)
+    core.unsuspend_card(tmp_db, 1)
+    review = ReviewInput(card_id=1, rating=3)
+    result = core.submit_review(tmp_db, review)
+    assert result.rating == "good"

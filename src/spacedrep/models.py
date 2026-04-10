@@ -28,6 +28,7 @@ class CardRecord(BaseModel):
     source_card_ord: int = 0
     created_at: datetime | None = None
     suspended: bool = False
+    buried_until: str | None = None
 
 
 class ReviewInput(BaseModel):
@@ -115,6 +116,7 @@ class CardSummary(BaseModel):
     state: str
     due: str
     suspended: bool
+    buried: bool = False
     lapse_count: int = 0
 
 
@@ -129,6 +131,7 @@ class CardDetail(BaseModel):
     extra_fields: dict[str, str] = {}
     source: CardSource = "manual"
     suspended: bool = False
+    buried_until: str | None = None
     created_at: str | None = None
     # FSRS state
     state: str
@@ -200,6 +203,26 @@ class ReviewPreview(BaseModel):
     card_id: int
     current_state: str
     previews: dict[str, RatingPreview]
+
+
+class ReviewLogEntry(BaseModel):
+    """A single review log entry."""
+
+    card_id: int
+    rating: int
+    rating_name: str
+    reviewed_at: str
+    user_answer: str | None = None
+    feedback: str | None = None
+    session_id: str | None = None
+
+
+class ReviewHistory(BaseModel):
+    """Review history for a card."""
+
+    card_id: int
+    reviews: list[ReviewLogEntry]
+    total: int
 
 
 class OptimizeResult(BaseModel):

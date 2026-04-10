@@ -41,15 +41,11 @@ See `spacedrep --help` and `spacedrep <command> --help` for all options.
 
 ## Features
 
-- **FSRS scheduling** — the same algorithm Anki uses since v23.10, via [py-fsrs](https://github.com/open-spaced-repetition/py-fsrs)
+- **FSRS scheduling** — same algorithm as Anki 23.10+, with parameter optimization from your review history
 - **Cloze deletions** — `{{c1::answer}}` syntax, auto-expands into multiple cards
-- **Full-text search** — find cards by content across question, answer, and extra fields
-- **Anki import/export** — bring your `.apkg` decks (see compatibility below)
-- **Leech detection** — cards rated "again" 8+ times are auto-suspended
-- **Review preview** — see what each rating would produce before committing
-- **Parameter optimization** — personalize FSRS from your review history
-- **Deck and tag hierarchy** — `Science::Chemistry` and `aws::s3` with prefix filtering
-- **Filtering** — by deck, tags, state, suspended status, source, or leeches
+- **Anki import/export** — round-trip `.apkg` support including cloze notes (see compatibility below)
+- **Rich filtering** — by deck, tags, state, date ranges, FSRS properties, and more
+- **Agent-friendly** — duplicate detection, leech detection, review preview, bury/unbury, review history
 - **SQLite storage** — single file, SQL-queryable
 
 ## Cloze Deletions
@@ -73,25 +69,21 @@ Hints are supported: `{{c1::Ottawa::capital city}}` shows `[capital city]` as th
 ## Search and Filters
 
 ```bash
-# Full-text search across question, answer, and extra fields
-spacedrep card list --search "Lambda"
-spacedrep card next --search "CAP theorem"
-
-# Filter by suspended status or source
-spacedrep card list --suspended
-spacedrep card list --no-suspended
-spacedrep card list --source apkg
-spacedrep card list --source generated
-
-# Combine filters
-spacedrep card list --deck AWS --search "serverless" --state review
+spacedrep card list --search "Lambda" --deck AWS --state review
+spacedrep card list --due-before "2026-12-31" --min-difficulty 5.0
+spacedrep card list --leeches
+spacedrep card history 42
+spacedrep card bury 42 --hours 4
+spacedrep deck export out.apkg --tags aws --state review
 ```
+
+Filters work on `card list`, `card next`, and `deck export`. See `--help` for the full list.
 
 ## Anki Compatibility
 
 Import handles the common card types: **Basic**, **Basic (and reversed)**, and **Cloze** deletions. Suspended cards, deck hierarchy, and tags are preserved.
 
-This is not a full Anki reimplementation. Things that are **not supported**: media files (images/audio are stripped to text), templates with JavaScript or conditional sections, nested cloze deletions, and scheduling data (imported cards start fresh with FSRS). Export writes basic two-field cards only.
+This is not a full Anki reimplementation. Things that are **not supported**: media files (images/audio are stripped to text), templates with JavaScript or conditional sections, nested cloze deletions, and scheduling data (imported cards start fresh with FSRS). Export writes basic and cloze notes. Suspended cards are tagged `suspended` on export.
 
 Re-importing the same `.apkg` updates existing cards rather than creating duplicates.
 
@@ -99,10 +91,10 @@ Re-importing the same `.apkg` updates existing cards rather than creating duplic
 
 An MCP server exposes spacedrep as tools for AI agents. Once connected, you can ask an agent to:
 
-- "Quiz me on my AWS deck" — it calls `get_next_card`, shows the question, evaluates your answer, and calls `submit_review`
-- "Make flashcards from these notes" — it calls `add_cards_bulk` with cards it generates from your material, including cloze deletions
-- "Which cards am I struggling with?" — it calls `list_cards` with the leeches filter and suggests rewrites
-- "Find my cards about Lambda" — it calls `list_cards` with the search filter
+- "Quiz me on my AWS deck" — fetches due cards, evaluates answers, submits reviews
+- "Make flashcards from these notes" — bulk-creates cards from source material
+- "Which cards am I struggling with?" — filters by leeches and suggests rewrites
+- "Skip this for now" — buries a card to revisit later
 
 ```bash
 pip install spacedrep[mcp]

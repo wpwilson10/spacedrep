@@ -19,12 +19,18 @@ from spacedrep.models import (
     DueCount,
     OverallStats,
     ReviewInput,
+    ReviewLogEntry,
     SessionStats,
 )
 
 _SQLITE_DT_FMT = "%Y-%m-%d %H:%M:%S"
 
 VALID_STATES = frozenset({"new", "learning", "review", "relearning"})
+
+
+def _now_str() -> str:
+    """Current UTC time as SQLite datetime string."""
+    return datetime.now(UTC).replace(tzinfo=None).strftime(_SQLITE_DT_FMT)
 
 
 def _to_sqlite_dt(dt: datetime) -> str:
@@ -54,7 +60,8 @@ CREATE TABLE IF NOT EXISTS cards (
     source_note_guid TEXT,
     source_card_ord INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    suspended INTEGER NOT NULL DEFAULT 0
+    suspended INTEGER NOT NULL DEFAULT 0,
+    buried_until TEXT
 );
 
 CREATE TABLE IF NOT EXISTS fsrs_state (
@@ -129,6 +136,7 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     """Run idempotent schema migrations."""
     _add_column_if_missing(conn, "fsrs_state", "lapse_count", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "cards", "source_card_ord", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "cards", "buried_until", "TEXT")
     # Convert comma-separated tags to space-separated (idempotent)
     rows = conn.execute("PRAGMA table_info(cards)").fetchall()
     if rows:
@@ -161,14 +169,27 @@ def _build_card_filter_clauses(
     search: str | None = None,
     suspended: bool | None = None,
     source: str | None = None,
-) -> tuple[str, list[str | int]]:
+    due_before: str | None = None,
+    due_after: str | None = None,
+    created_before: str | None = None,
+    created_after: str | None = None,
+    reviewed_before: str | None = None,
+    reviewed_after: str | None = None,
+    min_difficulty: float | None = None,
+    max_difficulty: float | None = None,
+    min_stability: float | None = None,
+    max_stability: float | None = None,
+    min_retrievability: float | None = None,
+    max_retrievability: float | None = None,
+    buried: bool | None = None,
+) -> tuple[str, list[str | int | float]]:
     """Build SQL WHERE fragments for card filtering.
 
     Returns (sql_fragment, params). The fragment uses AND-prefixed clauses
     suitable for appending to an existing WHERE.
     """
     clauses: list[str] = []
-    params: list[str | int] = []
+    params: list[str | int | float] = []
 
     if deck is not None:
         clauses.append("AND (d.name = ? OR d.name LIKE ?)")
@@ -219,6 +240,59 @@ def _build_card_filter_clauses(
         clauses.append("AND c.source = ?")
         params.append(source)
 
+    if due_before is not None:
+        clauses.append("AND fs.due <= ?")
+        params.append(due_before)
+
+    if due_after is not None:
+        clauses.append("AND fs.due >= ?")
+        params.append(due_after)
+
+    if created_before is not None:
+        clauses.append("AND c.created_at <= ?")
+        params.append(created_before)
+
+    if created_after is not None:
+        clauses.append("AND c.created_at >= ?")
+        params.append(created_after)
+
+    if reviewed_before is not None:
+        clauses.append("AND fs.last_review <= ?")
+        params.append(reviewed_before)
+
+    if reviewed_after is not None:
+        clauses.append("AND fs.last_review >= ?")
+        params.append(reviewed_after)
+
+    if min_difficulty is not None:
+        clauses.append("AND fs.difficulty >= ?")
+        params.append(min_difficulty)
+
+    if max_difficulty is not None:
+        clauses.append("AND fs.difficulty <= ?")
+        params.append(max_difficulty)
+
+    if min_stability is not None:
+        clauses.append("AND fs.stability >= ?")
+        params.append(min_stability)
+
+    if max_stability is not None:
+        clauses.append("AND fs.stability <= ?")
+        params.append(max_stability)
+
+    if min_retrievability is not None:
+        clauses.append("AND fs.retrievability >= ?")
+        params.append(min_retrievability)
+
+    if max_retrievability is not None:
+        clauses.append("AND fs.retrievability <= ?")
+        params.append(max_retrievability)
+
+    if buried is True:
+        clauses.append("AND c.buried_until IS NOT NULL AND c.buried_until > datetime('now')")
+    elif buried is False:
+        clauses.append("AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))")
+
     return (" ".join(clauses), params)
 
 
@@ -241,6 +315,7 @@ def list_decks(conn: sqlite3.Connection) -> list[DeckInfo]:
         SELECT d.name,
                COUNT(c.id) AS card_count,
                COUNT(CASE WHEN fs.due <= datetime('now') AND c.suspended = 0
+                          AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
                           THEN 1 END) AS due_count
         FROM decks d
         LEFT JOIN cards c ON c.deck_id = d.id
@@ -330,10 +405,11 @@ def get_next_due_card(
     tags: list[str] | None = None,
     state: str | None = None,
     search: str | None = None,
+    due_before: str | None = None,
 ) -> CardDue | None:
     """Get the next due card, optionally filtered. Returns None when nothing is due."""
     filter_sql, filter_params = _build_card_filter_clauses(
-        deck=deck, tags=tags, state=state, search=search
+        deck=deck, tags=tags, state=state, search=search, due_before=due_before
     )
     query = f"""
         SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
@@ -343,6 +419,7 @@ def get_next_due_card(
         JOIN fsrs_state fs ON fs.card_id = c.id
         JOIN decks d ON d.id = c.deck_id
         WHERE fs.due <= datetime('now') AND c.suspended = 0
+        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
         {filter_sql}
         ORDER BY fs.due ASC
         LIMIT 1
@@ -378,6 +455,19 @@ def list_cards(
     search: str | None = None,
     suspended: bool | None = None,
     source: str | None = None,
+    due_before: str | None = None,
+    due_after: str | None = None,
+    created_before: str | None = None,
+    created_after: str | None = None,
+    reviewed_before: str | None = None,
+    reviewed_after: str | None = None,
+    min_difficulty: float | None = None,
+    max_difficulty: float | None = None,
+    min_stability: float | None = None,
+    max_stability: float | None = None,
+    min_retrievability: float | None = None,
+    max_retrievability: float | None = None,
+    buried: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> CardListResult:
@@ -390,6 +480,19 @@ def list_cards(
         search=search,
         suspended=suspended,
         source=source,
+        due_before=due_before,
+        due_after=due_after,
+        created_before=created_before,
+        created_after=created_after,
+        reviewed_before=reviewed_before,
+        reviewed_after=reviewed_after,
+        min_difficulty=min_difficulty,
+        max_difficulty=max_difficulty,
+        min_stability=min_stability,
+        max_stability=max_stability,
+        min_retrievability=min_retrievability,
+        max_retrievability=max_retrievability,
+        buried=buried,
     )
 
     count_query = f"""
@@ -404,7 +507,7 @@ def list_cards(
 
     data_query = f"""
         SELECT c.id AS card_id, c.question, d.name AS deck, c.tags,
-               c.suspended, fs.state, fs.last_review, fs.due, fs.lapse_count
+               c.suspended, c.buried_until, fs.state, fs.last_review, fs.due, fs.lapse_count
         FROM cards c
         JOIN fsrs_state fs ON fs.card_id = c.id
         JOIN decks d ON d.id = c.deck_id
@@ -412,7 +515,7 @@ def list_cards(
         ORDER BY c.id ASC
         LIMIT ? OFFSET ?
     """
-    data_params: list[str | int] = [*filter_params, limit, offset]
+    data_params: list[str | int | float] = [*filter_params, limit, offset]
     rows = conn.execute(data_query, data_params).fetchall()
 
     cards = [
@@ -424,6 +527,7 @@ def list_cards(
             state=fsrs_engine.state_name(State(r["state"]), r["last_review"]),
             due=r["due"],
             suspended=bool(r["suspended"]),
+            buried=r["buried_until"] is not None and r["buried_until"] > _now_str(),
             lapse_count=r["lapse_count"],
         )
         for r in rows
@@ -436,7 +540,7 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
     row = conn.execute(
         """
         SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
-               c.tags, c.extra_fields, c.source, c.suspended, c.created_at,
+               c.tags, c.extra_fields, c.source, c.suspended, c.buried_until, c.created_at,
                fs.state, fs.due, fs.stability, fs.difficulty,
                fs.last_review, fs.fsrs_card_json, fs.lapse_count,
                (SELECT COUNT(*) FROM review_logs rl WHERE rl.card_id = c.id) AS review_count
@@ -462,6 +566,7 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
         extra_fields=extra_parsed,
         source=row["source"],
         suspended=bool(row["suspended"]),
+        buried_until=row["buried_until"],
         created_at=row["created_at"],
         state=fsrs_engine.state_name(State(row["state"]), row["last_review"]),
         due=row["due"],
@@ -535,6 +640,18 @@ def unsuspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def bury_card(conn: sqlite3.Connection, card_id: int, until: str) -> bool:
+    """Bury a card until a datetime. Returns False if not found."""
+    cursor = conn.execute("UPDATE cards SET buried_until = ? WHERE id = ?", (until, card_id))
+    return cursor.rowcount > 0
+
+
+def unbury_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Unbury a card. Returns False if not found."""
+    cursor = conn.execute("UPDATE cards SET buried_until = NULL WHERE id = ?", (card_id,))
+    return cursor.rowcount > 0
+
+
 def increment_lapse_count(conn: sqlite3.Connection, card_id: int) -> int:
     """Increment lapse count for a card. Returns the new count."""
     conn.execute(
@@ -545,6 +662,39 @@ def increment_lapse_count(conn: sqlite3.Connection, card_id: int) -> int:
         "SELECT lapse_count FROM fsrs_state WHERE card_id = ?", (card_id,)
     ).fetchone()
     return int(row["lapse_count"])
+
+
+def get_filtered_cards(
+    conn: sqlite3.Connection,
+    *,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    state: str | None = None,
+    search: str | None = None,
+    suspended: bool | None = None,
+    source: str | None = None,
+    buried: bool | None = None,
+) -> list[CardRecord]:
+    """Get cards matching filters, no pagination. For export use."""
+    filter_sql, filter_params = _build_card_filter_clauses(
+        deck=deck,
+        tags=tags,
+        state=state,
+        search=search,
+        suspended=suspended,
+        source=source,
+        buried=buried,
+    )
+    query = f"""
+        SELECT c.*
+        FROM cards c
+        JOIN fsrs_state fs ON fs.card_id = c.id
+        JOIN decks d ON d.id = c.deck_id
+        WHERE 1=1 {filter_sql}
+        ORDER BY c.id
+    """
+    rows = conn.execute(query, filter_params).fetchall()
+    return [_row_to_card_record(r) for r in rows]
 
 
 def get_all_cards(conn: sqlite3.Connection, deck_id: int | None = None) -> list[CardRecord]:
@@ -647,6 +797,7 @@ def get_due_count(conn: sqlite3.Connection) -> DueCount:
         FROM fsrs_state fs
         JOIN cards c ON c.id = fs.card_id
         WHERE fs.due <= datetime('now') AND c.suspended = 0
+        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
         GROUP BY fs.state, is_new
     """).fetchall()
 
@@ -724,6 +875,7 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
         SELECT COUNT(*) AS cnt FROM fsrs_state fs
         JOIN cards c ON c.id = fs.card_id
         WHERE fs.due <= datetime('now') AND c.suspended = 0
+        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
     """).fetchone()
     due_now = due_row["cnt"] if due_row else 0
 
@@ -734,6 +886,7 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
         FROM fsrs_state fs
         JOIN cards c ON c.id = fs.card_id
         WHERE c.suspended = 0
+        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
         GROUP BY fs.state, is_new
     """).fetchall()
 
@@ -751,6 +904,7 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
         SELECT COUNT(*) AS cnt FROM fsrs_state fs
         JOIN cards c ON c.id = fs.card_id
         WHERE fs.stability IS NOT NULL AND fs.stability > 21 AND c.suspended = 0
+        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
     """).fetchone()
     mature = mature_row["cnt"] if mature_row else 0
 
@@ -759,6 +913,7 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
         JOIN cards c ON c.id = fs.card_id
         WHERE fs.retrievability IS NOT NULL AND fs.last_review IS NOT NULL
               AND c.suspended = 0
+              AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
     """).fetchone()
     avg_retention = avg_ret_row["avg_ret"] if avg_ret_row and avg_ret_row["avg_ret"] else 0.0
 
@@ -812,6 +967,27 @@ def get_review_logs_for_card(conn: sqlite3.Connection, card_id: int) -> list[str
     return [r["fsrs_log_json"] for r in rows]
 
 
+def get_review_history(conn: sqlite3.Connection, card_id: int) -> list[ReviewLogEntry]:
+    """Get human-readable review history for a card, ordered by review time."""
+    rows = conn.execute(
+        """SELECT card_id, rating, reviewed_at, user_answer, feedback, session_id
+           FROM review_logs WHERE card_id = ? ORDER BY reviewed_at""",
+        (card_id,),
+    ).fetchall()
+    return [
+        ReviewLogEntry(
+            card_id=row["card_id"],
+            rating=row["rating"],
+            rating_name=fsrs_engine.rating_name(row["rating"]),
+            reviewed_at=row["reviewed_at"],
+            user_answer=row["user_answer"],
+            feedback=row["feedback"],
+            session_id=row["session_id"],
+        )
+        for row in rows
+    ]
+
+
 # --- Tag operations ---
 
 
@@ -844,4 +1020,5 @@ def _row_to_card_record(row: sqlite3.Row) -> CardRecord:
         source_card_ord=row["source_card_ord"],
         created_at=row["created_at"],
         suspended=bool(row["suspended"]),
+        buried_until=row["buried_until"],
     )

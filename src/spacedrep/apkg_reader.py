@@ -128,6 +128,7 @@ def read_apkg(
                             stripped = strip_html(fields[i])
                             if stripped:
                                 extra[fname] = stripped
+                    extra["_cloze_source"] = raw_text
                 elif len(minfo.templates) > 1:
                     # Multi-template basic model (e.g., basic+reversed)
                     question_text, answer_text, extra = resolve_template_fields(

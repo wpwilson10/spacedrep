@@ -500,7 +500,7 @@ class TestClozeWhitespaceTags:
 # ---------------------------------------------------------------------------
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean"}
-EXPECTED_TOOL_COUNT = 23
+EXPECTED_TOOL_COUNT = 26
 
 
 def _get_tools() -> dict[str, object]:

@@ -28,6 +28,40 @@ def test_add_card_and_get_next(tmp_db: Path) -> None:
     assert due.state == "new"
 
 
+def test_add_card_dedup_same_deck(tmp_db: Path) -> None:
+    """Adding the same question+deck twice returns same card_id with was_update=True."""
+    r1 = core.add_card(tmp_db, "What is X?", "X is Y.", deck="Test")
+    r2 = core.add_card(tmp_db, "What is X?", "Updated answer", deck="Test")
+    assert r1["card_id"] == r2["card_id"]
+    assert r2["was_update"] is True
+
+    # Verify the answer was updated
+    detail = core.get_card_detail(tmp_db, int(r1["card_id"]))
+    assert detail.answer == "Updated answer"
+
+
+def test_add_card_dedup_different_deck(tmp_db: Path) -> None:
+    """Same question in different decks creates separate cards."""
+    r1 = core.add_card(tmp_db, "What is X?", "A1", deck="DeckA")
+    r2 = core.add_card(tmp_db, "What is X?", "A2", deck="DeckB")
+    assert r1["card_id"] != r2["card_id"]
+
+
+def test_add_cards_bulk_dedup(tmp_db: Path) -> None:
+    """Bulk add with duplicate entries deduplicates."""
+    from spacedrep.models import BulkCardInput
+
+    cards = [
+        BulkCardInput(question="Q1", answer="A1", deck="Test"),
+        BulkCardInput(question="Q1", answer="A1-updated", deck="Test"),
+        BulkCardInput(question="Q2", answer="A2", deck="Test"),
+    ]
+    result = core.add_cards_bulk(tmp_db, cards)
+    assert result.count == 3  # 3 operations
+    assert result.created[0] == result.created[1]  # same card_id for duplicates
+    assert result.created[0] != result.created[2]  # different card
+
+
 def test_submit_review(populated_db: Path) -> None:
     due = core.get_next_card(populated_db)
     assert due is not None
@@ -387,6 +421,26 @@ def test_preview_review_not_found(tmp_db: Path) -> None:
         core.preview_review(tmp_db, 9999)
 
 
+# --- Review History tests ---
+
+
+def test_get_review_history(tmp_db: Path) -> None:
+    result = core.add_card(tmp_db, "Q", "A")
+    card_id = int(result["card_id"])
+    core.submit_review(tmp_db, ReviewInput(card_id=card_id, rating=3))
+    core.submit_review(tmp_db, ReviewInput(card_id=card_id, rating=4))
+    history = core.get_review_history(tmp_db, card_id)
+    assert history.card_id == card_id
+    assert history.total == 2
+    assert history.reviews[0].rating_name == "good"
+    assert history.reviews[1].rating_name == "easy"
+
+
+def test_get_review_history_not_found(tmp_db: Path) -> None:
+    with pytest.raises(core.CardNotFoundError):
+        core.get_review_history(tmp_db, 9999)
+
+
 # --- FSRS Status tests ---
 
 
@@ -452,6 +506,16 @@ def test_import_cloze_content(tmp_db: Path, cloze_apkg: Path) -> None:
     assert "[...]" in details[0].question and "Canada" in details[0].question
     # c2 (ord=1): Ottawa shown, Canada blanked
     assert "Ottawa" in details[1].question and "[...]" in details[1].question
+
+
+def test_import_cloze_stores_cloze_source(tmp_db: Path, cloze_apkg: Path) -> None:
+    core.import_deck(tmp_db, cloze_apkg)
+    cards = core.list_cards(tmp_db).cards
+    detail = core.get_card_detail(tmp_db, cards[0].card_id)
+    assert "_cloze_source" in detail.extra_fields
+    # Raw text should contain cloze markers
+    assert "{{c1::" in detail.extra_fields["_cloze_source"]
+    assert "{{c2::" in detail.extra_fields["_cloze_source"]
 
 
 def test_import_basic_reversed_produces_two_cards(tmp_db: Path, basic_reversed_apkg: Path) -> None:

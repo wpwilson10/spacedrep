@@ -131,9 +131,10 @@ def add_card(
     deck: Annotated[str, Field(description="Deck name (created if new)")] = "Default",
     tags: Annotated[str, Field(description="Space-separated tag names")] = "",
 ) -> dict[str, Any]:
-    """Add a new flashcard. Use when the user wants to create a single card.
-    Tags are space-separated. Use :: for hierarchy (e.g. 'foundations::rag').
-    Returns the new card ID and deck name."""
+    """Add a new flashcard. Re-adding the same question to the same deck updates
+    the existing card instead of creating a duplicate. Tags are space-separated.
+    Use :: for hierarchy (e.g. 'foundations::rag').
+    Returns the card ID, deck name, and was_update flag."""
     return core.add_card(_db_path(), question, answer, deck=deck, tags=tags)
 
 
@@ -214,6 +215,9 @@ def get_next_card(
     search: Annotated[
         str, Field(description="Search text in question, answer, and extra fields")
     ] = "",
+    due_before: Annotated[
+        str, Field(description="Only cards due before this datetime (ISO format)")
+    ] = "",
 ) -> dict[str, Any]:
     """Get the next flashcard due for review. Use at the start of a study session.
     Filter by deck name (includes :: sub-decks), space-separated tags, state, or
@@ -225,6 +229,7 @@ def get_next_card(
         tags=_parse_tags(tags),
         state=_or_none(state),
         search=_or_none(search),
+        due_before=_or_none(due_before),
     )
     if result is None:
         next_due = core.get_next_due_time(_db_path())
@@ -246,18 +251,65 @@ def list_cards(
         str, Field(description="Filter by suspended: 'true', 'false', or '' for all")
     ] = "",
     source: Annotated[str, Field(description="Filter by source: apkg, manual, or generated")] = "",
+    due_before: Annotated[
+        str, Field(description="Cards due before this datetime (ISO format)")
+    ] = "",
+    due_after: Annotated[str, Field(description="Cards due after this datetime (ISO format)")] = "",
+    created_before: Annotated[
+        str, Field(description="Cards created before this datetime (ISO format)")
+    ] = "",
+    created_after: Annotated[
+        str, Field(description="Cards created after this datetime (ISO format)")
+    ] = "",
+    reviewed_before: Annotated[
+        str, Field(description="Cards last reviewed before this datetime (ISO format)")
+    ] = "",
+    reviewed_after: Annotated[
+        str, Field(description="Cards last reviewed after this datetime (ISO format)")
+    ] = "",
+    min_difficulty: Annotated[
+        float, Field(description="Minimum difficulty (0-10). Use -1 for no filter.")
+    ] = -1.0,
+    max_difficulty: Annotated[
+        float, Field(description="Maximum difficulty (0-10). Use -1 for no filter.")
+    ] = -1.0,
+    min_stability: Annotated[
+        float, Field(description="Minimum stability in days. Use -1 for no filter.")
+    ] = -1.0,
+    max_stability: Annotated[
+        float, Field(description="Maximum stability in days. Use -1 for no filter.")
+    ] = -1.0,
+    min_retrievability: Annotated[
+        float, Field(description="Minimum retrievability (0-1). Use -1 for no filter.")
+    ] = -1.0,
+    max_retrievability: Annotated[
+        float, Field(description="Maximum retrievability (0-1). Use -1 for no filter.")
+    ] = -1.0,
+    buried: Annotated[
+        str, Field(description="Filter by buried: 'true', 'false', or '' for all")
+    ] = "",
     limit: Annotated[int, Field(description="Max cards to return")] = 50,
     offset: Annotated[int, Field(description="Skip this many cards (for pagination)")] = 0,
 ) -> dict[str, Any]:
     """List flashcards with optional filters and pagination. Use to browse or
     search cards. Filter by deck (includes :: sub-decks), tags, state, search text,
-    suspended status, source, or leeches. Tag filter matches the tag and all
-    children (e.g. 'foundations' matches 'foundations::rag')."""
+    suspended status, source, date ranges, or leeches. Tag filter matches the tag
+    and all children (e.g. 'foundations' matches 'foundations::rag')."""
     suspended_bool: bool | None = None
     if suspended == "true":
         suspended_bool = True
     elif suspended == "false":
         suspended_bool = False
+
+    buried_bool: bool | None = None
+    if buried == "true":
+        buried_bool = True
+    elif buried == "false":
+        buried_bool = False
+
+    def _float_or_none(v: float) -> float | None:
+        return v if v >= 0 else None
+
     return _serialize(
         core.list_cards(
             _db_path(),
@@ -268,6 +320,19 @@ def list_cards(
             leeches_only=leeches_only,
             suspended=suspended_bool,
             source=_or_none(source),
+            due_before=_or_none(due_before),
+            due_after=_or_none(due_after),
+            created_before=_or_none(created_before),
+            created_after=_or_none(created_after),
+            reviewed_before=_or_none(reviewed_before),
+            reviewed_after=_or_none(reviewed_after),
+            min_difficulty=_float_or_none(min_difficulty),
+            max_difficulty=_float_or_none(max_difficulty),
+            min_stability=_float_or_none(min_stability),
+            max_stability=_float_or_none(max_stability),
+            min_retrievability=_float_or_none(min_retrievability),
+            max_retrievability=_float_or_none(max_retrievability),
+            buried=buried_bool,
             limit=limit,
             offset=offset,
         )
@@ -280,6 +345,15 @@ def get_card(card_id: int) -> dict[str, Any]:
     """Get full detail for a single flashcard by ID. Use to inspect a card's
     question, answer, FSRS scheduling state, and review history."""
     return _serialize(core.get_card_detail(_db_path(), card_id))
+
+
+@mcp.tool()
+@_handle_errors
+def get_review_history(card_id: int) -> dict[str, Any]:
+    """Get the review history for a card. Returns a list of review entries with
+    rating, rating name, timestamp, and optional user answer/feedback. Use to
+    analyze how a card has been performing over time."""
+    return _serialize(core.get_review_history(_db_path(), card_id))
 
 
 @mcp.tool()
@@ -332,6 +406,25 @@ def unsuspend_card(
 ) -> dict[str, Any]:
     """Unsuspend a card to include it in reviews again. Use dry_run=true to preview."""
     return core.unsuspend_card(_db_path(), card_id, dry_run=dry_run)
+
+
+@mcp.tool()
+@_handle_errors
+def bury_card(
+    card_id: int,
+    hours: Annotated[int, Field(description="Hours to bury the card for")] = 24,
+) -> dict[str, Any]:
+    """Temporarily exclude a card from reviews for a number of hours. Unlike
+    suspend, buried cards automatically reappear when the time expires. Use for
+    cards to revisit later in the session or tomorrow."""
+    return core.bury_card(_db_path(), card_id, hours=hours)
+
+
+@mcp.tool()
+@_handle_errors
+def unbury_card(card_id: int) -> dict[str, Any]:
+    """Remove a card from buried status so it appears in reviews again."""
+    return core.unbury_card(_db_path(), card_id)
 
 
 # ---------------------------------------------------------------------------
@@ -410,11 +503,42 @@ def import_deck(
 def export_deck(
     output_path: Annotated[str, Field(description="Absolute path for the output .apkg file")],
     deck: Annotated[str, Field(description="Deck name to export (all if empty)")] = "",
+    tags: Annotated[str, Field(description="Space-separated tags filter")] = "",
+    state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
+    search: Annotated[str, Field(description="Search text filter")] = "",
+    suspended: Annotated[
+        str, Field(description="Filter by suspended: 'true', 'false', or '' for all")
+    ] = "",
+    source: Annotated[str, Field(description="Filter by source: apkg, manual, or generated")] = "",
+    buried: Annotated[
+        str, Field(description="Filter by buried: 'true', 'false', or '' for all")
+    ] = "",
 ) -> dict[str, Any]:
-    """Export flashcards to an Anki .apkg file. Optionally filter by deck name.
-    If no deck specified, exports all cards."""
+    """Export flashcards to an Anki .apkg file. Filter by deck, tags, state,
+    search text, suspended/buried status, or source. Non-existent deck
+    returns 0 exported."""
     validated = _validate_file_path(output_path)
-    count = core.export_deck(_db_path(), validated, _or_none(deck))
+    suspended_bool: bool | None = None
+    if suspended == "true":
+        suspended_bool = True
+    elif suspended == "false":
+        suspended_bool = False
+    buried_bool: bool | None = None
+    if buried == "true":
+        buried_bool = True
+    elif buried == "false":
+        buried_bool = False
+    count = core.export_deck(
+        _db_path(),
+        validated,
+        deck=_or_none(deck),
+        tags=_parse_tags(tags),
+        state=_or_none(state),
+        search=_or_none(search),
+        suspended=suspended_bool,
+        source=_or_none(source),
+        buried=buried_bool,
+    )
     return {"exported": count, "file": str(validated)}
 
 

@@ -32,6 +32,9 @@ def next_card(
     search: str | None = typer.Option(
         None, "--search", "-s", help="Search text in question, answer, and extra fields"
     ),
+    due_before: str | None = typer.Option(
+        None, "--due-before", help="Only cards due before this datetime (ISO format)"
+    ),
     quiet: bool = QUIET_OPT,
     db: Path = DB_DEFAULT,
 ) -> None:
@@ -46,7 +49,9 @@ def next_card(
     """
     try:
         tags_list = _parse_tags(tags)
-        result = core.get_next_card(db, deck=deck, tags=tags_list, state=state, search=search)
+        result = core.get_next_card(
+            db, deck=deck, tags=tags_list, state=state, search=search, due_before=due_before
+        )
         if result is None:
             if quiet:
                 return
@@ -135,7 +140,44 @@ def list_cards(
     ),
     leeches: bool = typer.Option(False, "--leeches", help="Show only leech cards"),
     suspended: bool | None = typer.Option(None, help="Filter by suspended status"),
+    buried: bool | None = typer.Option(None, "--buried", help="Filter by buried status"),
     source: str | None = typer.Option(None, help="Filter by source: apkg, manual, generated"),
+    due_before: str | None = typer.Option(
+        None, "--due-before", help="Cards due before this datetime (ISO format)"
+    ),
+    due_after: str | None = typer.Option(
+        None, "--due-after", help="Cards due after this datetime (ISO format)"
+    ),
+    created_before: str | None = typer.Option(
+        None, "--created-before", help="Cards created before this datetime (ISO format)"
+    ),
+    created_after: str | None = typer.Option(
+        None, "--created-after", help="Cards created after this datetime (ISO format)"
+    ),
+    reviewed_before: str | None = typer.Option(
+        None, "--reviewed-before", help="Cards last reviewed before this datetime (ISO format)"
+    ),
+    reviewed_after: str | None = typer.Option(
+        None, "--reviewed-after", help="Cards last reviewed after this datetime (ISO format)"
+    ),
+    min_difficulty: float | None = typer.Option(
+        None, "--min-difficulty", help="Minimum difficulty (0-10)"
+    ),
+    max_difficulty: float | None = typer.Option(
+        None, "--max-difficulty", help="Maximum difficulty (0-10)"
+    ),
+    min_stability: float | None = typer.Option(
+        None, "--min-stability", help="Minimum stability in days"
+    ),
+    max_stability: float | None = typer.Option(
+        None, "--max-stability", help="Maximum stability in days"
+    ),
+    min_retrievability: float | None = typer.Option(
+        None, "--min-retrievability", help="Minimum retrievability (0-1)"
+    ),
+    max_retrievability: float | None = typer.Option(
+        None, "--max-retrievability", help="Maximum retrievability (0-1)"
+    ),
     limit: int = typer.Option(50, help="Max cards to return"),
     offset: int = typer.Option(0, help="Offset for pagination"),
     quiet: bool = QUIET_OPT,
@@ -158,6 +200,19 @@ def list_cards(
             search=search,
             suspended=suspended,
             source=source,
+            due_before=due_before,
+            due_after=due_after,
+            created_before=created_before,
+            created_after=created_after,
+            reviewed_before=reviewed_before,
+            reviewed_after=reviewed_after,
+            min_difficulty=min_difficulty,
+            max_difficulty=max_difficulty,
+            min_stability=min_stability,
+            max_stability=max_stability,
+            min_retrievability=min_retrievability,
+            max_retrievability=max_retrievability,
+            buried=buried,
             limit=limit,
             offset=offset,
         )
@@ -319,6 +374,51 @@ def unsuspend(
         raise typer.Exit(code=e.exit_code) from None
 
 
+@card_app.command("bury")
+def bury(
+    card_id: int = typer.Argument(..., help="Card ID to bury"),
+    hours: int = typer.Option(24, "--hours", help="Hours to bury the card for"),
+    quiet: bool = QUIET_OPT,
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Temporarily exclude a card from reviews.
+
+    Example:
+        spacedrep card bury 42 --hours 4
+    """
+    try:
+        result = core.bury_card(db, card_id, hours=hours)
+        if quiet:
+            output_quiet(result["card_id"])
+        else:
+            output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
+@card_app.command("unbury")
+def unbury(
+    card_id: int = typer.Argument(..., help="Card ID to unbury"),
+    quiet: bool = QUIET_OPT,
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Remove a card from buried status.
+
+    Example:
+        spacedrep card unbury 42
+    """
+    try:
+        result = core.unbury_card(db, card_id)
+        if quiet:
+            output_quiet(result["card_id"])
+        else:
+            output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
 @card_app.command("add-cloze")
 def add_cloze(
     text: str = typer.Argument(..., help="Cloze text with {{c1::answer}} syntax"),
@@ -338,6 +438,24 @@ def add_cloze(
             output_quiet(result.card_ids)
         else:
             output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
+@card_app.command("history")
+def history(
+    card_id: int = typer.Argument(..., help="Card ID"),
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Show review history for a card.
+
+    Example:
+        spacedrep card history 1
+    """
+    try:
+        result = core.get_review_history(db, card_id)
+        output_json(result)
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None

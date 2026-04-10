@@ -555,3 +555,118 @@ def test_get_review_logs_for_card_empty(tmp_db: Path) -> None:
     result = db.get_review_logs_for_card(conn, 999)
     assert result == []
     conn.close()
+
+
+def test_get_review_history(populated_db: Path) -> None:
+    from spacedrep.models import ReviewInput
+
+    # Submit a review to create history
+    conn = db.get_connection(populated_db)
+    cards = db.list_cards(conn)
+    card_id = cards.cards[0].card_id
+    conn.close()
+
+    from spacedrep import core
+
+    core.submit_review(populated_db, ReviewInput(card_id=card_id, rating=3))
+    conn = db.get_connection(populated_db)
+    history = db.get_review_history(conn, card_id)
+    assert len(history) == 1
+    assert history[0].rating == 3
+    assert history[0].rating_name == "good"
+    assert history[0].card_id == card_id
+    conn.close()
+
+
+def test_get_review_history_empty(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    result = db.get_review_history(conn, 999)
+    assert result == []
+    conn.close()
+
+
+def test_date_filter_due_before(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    # All new cards are due now, so a future due_before should return them
+    result = db.list_cards(conn, due_before="2099-12-31 23:59:59")
+    assert result.total > 0
+    # A past due_before should return nothing
+    result = db.list_cards(conn, due_before="2000-01-01 00:00:00")
+    assert result.total == 0
+    conn.close()
+
+
+def test_date_filter_created_after(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    # Cards just created, so created_after far past should return them
+    result = db.list_cards(conn, created_after="2000-01-01")
+    assert result.total > 0
+    # Far future should return nothing
+    result = db.list_cards(conn, created_after="2099-12-31")
+    assert result.total == 0
+    conn.close()
+
+
+def test_fsrs_property_filter_difficulty(populated_db: Path) -> None:
+    from spacedrep import core
+    from spacedrep.models import ReviewInput
+
+    conn = db.get_connection(populated_db)
+    cards = db.list_cards(conn)
+    card_id = cards.cards[0].card_id
+    conn.close()
+
+    # Submit a review to generate non-zero FSRS properties
+    core.submit_review(populated_db, ReviewInput(card_id=card_id, rating=3))
+
+    conn = db.get_connection(populated_db)
+    # Get the card's difficulty
+    detail = db.get_card_detail(conn, card_id)
+    assert detail is not None
+    diff = detail.difficulty
+
+    # Filter should include this card
+    result = db.list_cards(conn, min_difficulty=diff - 0.1)
+    card_ids = {c.card_id for c in result.cards}
+    assert card_id in card_ids
+
+    # Filter above the difficulty should exclude it
+    result = db.list_cards(conn, min_difficulty=diff + 0.1)
+    card_ids = {c.card_id for c in result.cards}
+    assert card_id not in card_ids
+    conn.close()
+
+
+def test_bury_card(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    cards = db.list_cards(conn)
+    card_id = cards.cards[0].card_id
+
+    # Bury the card until far future
+    assert db.bury_card(conn, card_id, "2099-12-31 23:59:59")
+    conn.commit()
+
+    # Should be excluded from get_next_due_card
+    due = db.get_next_due_card(conn)
+    if due is not None:
+        assert due.card_id != card_id
+
+    # Should appear with buried=True in list
+    result = db.list_cards(conn, buried=True)
+    buried_ids = {c.card_id for c in result.cards}
+    assert card_id in buried_ids
+
+    # Unbury
+    assert db.unbury_card(conn, card_id)
+    conn.commit()
+
+    result = db.list_cards(conn, buried=True)
+    assert all(c.card_id != card_id for c in result.cards)
+    conn.close()
+
+
+def test_bury_not_found(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    assert not db.bury_card(conn, 9999, "2099-12-31")
+    assert not db.unbury_card(conn, 9999)
+    conn.close()

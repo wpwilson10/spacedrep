@@ -26,6 +26,7 @@ from spacedrep.models import (
     ImportResult,
     OptimizeResult,
     OverallStats,
+    ReviewHistory,
     ReviewInput,
     ReviewPreview,
     ReviewResult,
@@ -224,11 +225,14 @@ def get_next_card(
     tags: list[str] | None = None,
     state: str | None = None,
     search: str | None = None,
+    due_before: str | None = None,
 ) -> CardDue | None:
     """Get the next due card for review, with optional filters."""
     _validate_state(state)
     with _open_db(db_path) as conn:
-        return db.get_next_due_card(conn, deck=deck, tags=tags, state=state, search=search)
+        return db.get_next_due_card(
+            conn, deck=deck, tags=tags, state=state, search=search, due_before=due_before
+        )
 
 
 def get_next_due_time(db_path: Path) -> str | None:
@@ -288,6 +292,11 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
         )
 
 
+def _basic_note_id(question: str, deck: str) -> int:
+    """Generate a deterministic source_note_id for basic cards."""
+    return int(hashlib.sha256(f"{question}\x1f{deck}".encode()).hexdigest()[:15], 16)
+
+
 def add_card(
     db_path: Path,
     question: str,
@@ -295,20 +304,23 @@ def add_card(
     deck: str = "Default",
     tags: str = "",
     source: CardSource = "manual",
-) -> dict[str, int | str]:
-    """Add a new card."""
+) -> dict[str, int | str | bool]:
+    """Add a new card. Re-adding the same question to the same deck updates the existing card."""
     with _open_db(db_path) as conn:
         deck_id = db.upsert_deck(conn, deck)
+        note_id = _basic_note_id(question, deck)
         card = CardRecord(
             deck_id=deck_id,
             question=question,
             answer=answer,
             tags=tags,
             source=source,
+            source_note_id=note_id,
+            source_card_ord=0,
         )
-        card_id, _ = db.insert_card(conn, card)
+        card_id, was_update = db.insert_card(conn, card)
         conn.commit()
-        return {"card_id": card_id, "deck": deck}
+        return {"card_id": card_id, "deck": deck, "was_update": was_update}
 
 
 def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
@@ -324,12 +336,15 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
                 )
                 created.extend(card_ids)
             else:
+                note_id = _basic_note_id(card_input.question, card_input.deck)
                 card = CardRecord(
                     deck_id=deck_id,
                     question=card_input.question,
                     answer=card_input.answer,
                     tags=card_input.tags,
                     source="manual",
+                    source_note_id=note_id,
+                    source_card_ord=0,
                 )
                 card_id, _ = db.insert_card(conn, card)
                 created.append(card_id)
@@ -338,6 +353,17 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
 
 
 _CLOZE_PATTERN = re.compile(r"\{\{c(\d+)::(.+?)(?:::.*?)?\}\}", re.DOTALL)
+
+
+def _is_cloze_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Check if a card is part of a cloze note by looking for _cloze_source in extra_fields."""
+    import json as _json
+
+    row = conn.execute("SELECT extra_fields FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row is None or row["extra_fields"] is None:
+        return False
+    extra = _json.loads(row["extra_fields"])
+    return "_cloze_source" in extra
 
 
 def _cloze_note_id(text: str) -> int:
@@ -436,7 +462,7 @@ def update_cloze_note(
         ).fetchone()
         if row is None:
             raise CardNotFoundError(card_id)
-        if row["source_note_id"] is None:
+        if row["source_note_id"] is None or not _is_cloze_card(conn, card_id):
             raise NotAClozeNoteError(card_id)
 
         source_note_id: int = row["source_note_id"]
@@ -467,6 +493,19 @@ def list_cards(
     search: str | None = None,
     suspended: bool | None = None,
     source: str | None = None,
+    due_before: str | None = None,
+    due_after: str | None = None,
+    created_before: str | None = None,
+    created_after: str | None = None,
+    reviewed_before: str | None = None,
+    reviewed_after: str | None = None,
+    min_difficulty: float | None = None,
+    max_difficulty: float | None = None,
+    min_stability: float | None = None,
+    max_stability: float | None = None,
+    min_retrievability: float | None = None,
+    max_retrievability: float | None = None,
+    buried: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> CardListResult:
@@ -483,6 +522,19 @@ def list_cards(
             search=search,
             suspended=suspended,
             source=source,
+            due_before=due_before,
+            due_after=due_after,
+            created_before=created_before,
+            created_after=created_after,
+            reviewed_before=reviewed_before,
+            reviewed_after=reviewed_after,
+            min_difficulty=min_difficulty,
+            max_difficulty=max_difficulty,
+            min_stability=min_stability,
+            max_stability=max_stability,
+            min_retrievability=min_retrievability,
+            max_retrievability=max_retrievability,
+            buried=buried,
             limit=limit,
             offset=offset,
         )
@@ -495,6 +547,16 @@ def get_card_detail(db_path: Path, card_id: int) -> CardDetail:
         if detail is None:
             raise CardNotFoundError(card_id)
         return detail
+
+
+def get_review_history(db_path: Path, card_id: int) -> ReviewHistory:
+    """Get review history for a card. Raises CardNotFoundError if not found."""
+    with _open_db(db_path) as conn:
+        detail = db.get_card_detail(conn, card_id)
+        if detail is None:
+            raise CardNotFoundError(card_id)
+        reviews = db.get_review_history(conn, card_id)
+        return ReviewHistory(card_id=card_id, reviews=reviews, total=len(reviews))
 
 
 def preview_review(db_path: Path, card_id: int) -> ReviewPreview:
@@ -634,6 +696,29 @@ def unsuspend_card(db_path: Path, card_id: int, *, dry_run: bool = False) -> dic
         return {"card_id": card_id, "suspended": False}
 
 
+def bury_card(db_path: Path, card_id: int, hours: int = 24) -> dict[str, int | str]:
+    """Bury a card for a number of hours. Raises CardNotFoundError if not found."""
+    from datetime import UTC, datetime, timedelta
+
+    until = (datetime.now(UTC) + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    with _open_db(db_path) as conn:
+        result = db.bury_card(conn, card_id, until)
+        if not result:
+            raise CardNotFoundError(card_id)
+        conn.commit()
+        return {"card_id": card_id, "buried_until": until}
+
+
+def unbury_card(db_path: Path, card_id: int) -> dict[str, int | bool]:
+    """Unbury a card. Raises CardNotFoundError if not found."""
+    with _open_db(db_path) as conn:
+        result = db.unbury_card(conn, card_id)
+        if not result:
+            raise CardNotFoundError(card_id)
+        conn.commit()
+        return {"card_id": card_id, "buried": False}
+
+
 def import_deck(
     db_path: Path,
     apkg_path: Path,
@@ -727,24 +812,36 @@ def import_deck(
         )
 
 
-def export_deck(db_path: Path, output_path: Path, deck: str | None = None) -> int:
-    """Export cards to an .apkg file. Returns count of exported cards."""
+def export_deck(
+    db_path: Path,
+    output_path: Path,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    state: str | None = None,
+    search: str | None = None,
+    suspended: bool | None = None,
+    source: str | None = None,
+    buried: bool | None = None,
+) -> int:
+    """Export cards to an .apkg file. Returns count of exported cards.
+
+    Filters by deck, tags, state, search, suspended, source, or buried.
+    Non-existent deck returns 0 exported.
+    """
     from spacedrep.apkg_writer import write_apkg
 
+    _validate_state(state)
     with _open_db(db_path) as conn:
-        deck_id: int | None = None
-        if deck:
-            row = conn.execute("SELECT id FROM decks WHERE name = ?", (deck,)).fetchone()
-            if row is None:
-                raise SpacedrepError(
-                    error_code="deck_not_found",
-                    message=f"Deck '{deck}' not found",
-                    suggestion="Check available decks with 'spacedrep deck list'",
-                    exit_code=3,
-                )
-            deck_id = row["id"]
-
-        cards = db.get_all_cards(conn, deck_id)
+        cards = db.get_filtered_cards(
+            conn,
+            deck=deck,
+            tags=tags,
+            state=state,
+            search=search,
+            suspended=suspended,
+            source=source,
+            buried=buried,
+        )
         deck_recs = db.get_deck_records(conn)
         return write_apkg(cards, deck_recs, output_path)
 

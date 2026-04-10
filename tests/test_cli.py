@@ -230,6 +230,30 @@ class TestCardGet:
             assert data["error"] == "card_not_found"
 
 
+class TestCardHistory:
+    def test_history_with_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            _add_card(db_path, "Q1", "A1")
+            _run(["review", "submit", "1", "good"], db_path)
+
+            result = _run(["card", "history", "1"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["card_id"] == 1
+            assert data["total"] == 1
+            assert data["reviews"][0]["rating_name"] == "good"
+
+    def test_history_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(["card", "history", "999"], db_path)
+            assert result.returncode == 3
+
+
 class TestCardDelete:
     def test_delete_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

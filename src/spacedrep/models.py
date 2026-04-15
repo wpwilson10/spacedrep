@@ -246,3 +246,19 @@ class FsrsStatus(BaseModel):
     review_count: int
     min_reviews_needed: int
     can_optimize: bool
+
+
+class OpenResult(BaseModel):
+    """Result of opening an .apkg file as a working database."""
+
+    db_path: str
+    card_count: int
+    deck_count: int
+    decks: list[str]
+
+
+class SaveResult(BaseModel):
+    """Result of saving the working database as an .apkg file."""
+
+    output_path: str
+    card_count: int

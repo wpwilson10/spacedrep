@@ -44,7 +44,7 @@ VALID_STATES = frozenset({"new", "learning", "review", "relearning"})
 _next_id_counter = 0
 
 
-def _next_id() -> int:
+def next_id() -> int:
     """Generate a unique timestamp-based ID (milliseconds + counter)."""
     global _next_id_counter
     ts = int(time.time() * 1000)
@@ -97,7 +97,7 @@ def init_db(conn: sqlite3.Connection) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _load_col_meta(conn: sqlite3.Connection) -> ColMeta:
+def load_col_meta(conn: sqlite3.Connection) -> ColMeta:
     """Read and parse the col row."""
     row = conn.execute(
         "SELECT crt, mod, scm, ver, conf, models, decks, dconf, tags FROM col WHERE id = 1"
@@ -108,7 +108,7 @@ def _load_col_meta(conn: sqlite3.Connection) -> ColMeta:
     return ColMeta.from_row(dict(row))
 
 
-def _save_col_meta(conn: sqlite3.Connection, meta: ColMeta) -> None:
+def save_col_meta(conn: sqlite3.Connection, meta: ColMeta) -> None:
     """Write the col row back to the database."""
     meta.mod = int(time.time())
     conn.execute(
@@ -177,15 +177,15 @@ def upsert_deck(conn: sqlite3.Connection, name: str, source_id: int | None = Non
 
     source_id is ignored in the new schema (kept for API compat).
     """
-    meta = _load_col_meta(conn)
+    meta = load_col_meta(conn)
     deck_id = meta.ensure_deck(name)
-    _save_col_meta(conn, meta)
+    save_col_meta(conn, meta)
     return deck_id
 
 
 def list_decks(conn: sqlite3.Connection) -> list[DeckInfo]:
     """List all decks with card counts and due counts."""
-    meta = _load_col_meta(conn)
+    meta = load_col_meta(conn)
     crt = meta.crt
     now_ts = int(time.time())
     now_days = int((now_ts - crt) / 86400)
@@ -244,10 +244,10 @@ def insert_card(
     """
     now = int(time.time())
 
-    meta = _load_col_meta(conn)
+    meta = load_col_meta(conn)
     did = meta.ensure_deck(deck_name)
     mid = meta.ensure_model(model_type)
-    _save_col_meta(conn, meta)
+    save_col_meta(conn, meta)
 
     # Build flds
     if note_flds is None:
@@ -273,7 +273,7 @@ def insert_card(
         return (card_id, True)
 
     # Insert new note
-    note_id = _next_id()
+    note_id = next_id()
     conn.execute(
         "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)"
         " VALUES (?, ?, ?, ?, -1, ?, ?, ?, 0, 0, '')",
@@ -285,7 +285,7 @@ def insert_card(
     position = (int(pos_row["maxdue"]) + 1) if (pos_row and pos_row["maxdue"] is not None) else 0
 
     # Insert card
-    card_id = _next_id()
+    card_id = next_id()
     conn.execute(
         "INSERT INTO cards"
         " (id, nid, did, ord, mod, usn, type, queue, due, ivl,"
@@ -319,7 +319,7 @@ def insert_cloze_cards(
 
     card_ids: list[int] = []
     for i in range(cloze_count):
-        card_id = _next_id()
+        card_id = next_id()
         conn.execute(
             "INSERT INTO cards"
             " (id, nid, did, ord, mod, usn, type, queue, due, ivl,"
@@ -349,7 +349,7 @@ def _render_from_row(
     return render_card(str(row["flds"]), minfo, int(row["ord"]))
 
 
-def _card_state_name(card_type: int, last_review_ts: int | None) -> str:
+def card_state_name(card_type: int, last_review_ts: int | None) -> str:
     """Convert Anki card type to human-readable state name."""
     if card_type == 0:
         return "new"
@@ -359,7 +359,7 @@ def _card_state_name(card_type: int, last_review_ts: int | None) -> str:
     return state
 
 
-def _get_last_review_ts(data_str: str) -> int | None:
+def get_last_review_ts(data_str: str) -> int | None:
     """Extract lrt from cards.data JSON, or None."""
     if not data_str:
         return None
@@ -421,8 +421,8 @@ def get_next_due_card(
         return None
 
     question, answer, extra = _render_from_row(row, models)
-    deck_name = _deck_name_for_did(conn, row["did"])
-    lrt = _get_last_review_ts(row["data"])
+    deck_name = deck_name_for_did(conn, row["did"])
+    lrt = get_last_review_ts(row["data"])
 
     # Get FSRS card for retrievability
     fsrs_card = anki_fields_to_fsrs_card(dict(row), crt)
@@ -434,7 +434,7 @@ def get_next_due_card(
         answer=answer,
         deck=deck_name,
         tags=row["tags"],
-        state=_card_state_name(row["type"], lrt),
+        state=card_state_name(row["type"], lrt),
         retrievability=round(retrievability, 4),
         extra_fields=extra,
     )
@@ -516,15 +516,15 @@ def list_cards(
     cards: list[CardSummary] = []
     for r in rows:
         question, _, _ = _render_from_row(r, models)
-        lrt = _get_last_review_ts(r["data"])
+        lrt = get_last_review_ts(r["data"])
         due_dt = due_to_datetime(int(r["due"]) if "due" in dict(r) else 0, r["type"], crt)
         cards.append(
             CardSummary(
                 card_id=r["card_id"],
                 question=question[:100],
-                deck=_deck_name_for_did(conn, r["did"]),
+                deck=deck_name_for_did(conn, r["did"]),
                 tags=r["tags"],
-                state=_card_state_name(r["type"], lrt),
+                state=card_state_name(r["type"], lrt),
                 due=due_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 suspended=r["queue"] == -1,
                 buried=r["buried_until"] is not None and r["buried_until"] > _now_str(),
@@ -559,7 +559,7 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
     question, answer, extra = _render_from_row(row, models)
     fsrs_card = anki_fields_to_fsrs_card(dict(row), crt)
     retrievability = fsrs_engine.get_retrievability(fsrs_card)
-    lrt = _get_last_review_ts(row["data"])
+    lrt = get_last_review_ts(row["data"])
     due_dt = due_to_datetime(row["due"], row["type"], crt)
 
     last_review_str: str | None = None
@@ -574,14 +574,14 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
         card_id=row["card_id"],
         question=question,
         answer=answer,
-        deck=_deck_name_for_did(conn, row["did"]),
+        deck=deck_name_for_did(conn, row["did"]),
         tags=row["tags"],
         extra_fields=extra,
         source=row["source"] or "manual",
         suspended=row["queue"] == -1,
         buried_until=row["buried_until"],
         created_at=created_at,
-        state=_card_state_name(row["type"], lrt),
+        state=card_state_name(row["type"], lrt),
         due=due_dt.strftime("%Y-%m-%d %H:%M:%S"),
         stability=round(float(fsrs_card.stability or 0.0), 4),
         difficulty=round(float(fsrs_card.difficulty or 0.0), 4),
@@ -809,7 +809,7 @@ def insert_review_log(
     fsrs_log_json: str,
 ) -> None:
     """Insert a review into revlog + spacedrep_review_extra."""
-    now_ms = _next_id()
+    now_ms = next_id()
 
     # Parse fsrs log for ivl/lastIvl
     try:
@@ -1074,16 +1074,17 @@ def get_all_review_log_jsons(conn: sqlite3.Connection) -> list[tuple[int, str]]:
 
     Constructs py-fsrs compatible ReviewLog JSON from revlog table.
     """
-    rows = conn.execute("SELECT cid, id, ease, ivl, lastIvl FROM revlog ORDER BY id").fetchall()
+    rows = conn.execute(
+        "SELECT cid, id, ease, ivl, lastIvl, time FROM revlog ORDER BY id"
+    ).fetchall()
     results: list[tuple[int, str]] = []
     for r in rows:
         review_dt = datetime.fromtimestamp(r["id"] / 1000, tz=UTC)
         log = {
+            "card_id": r["cid"],
             "rating": r["ease"],
-            "scheduled_days": r["ivl"],
-            "elapsed_days": r["lastIvl"],
-            "review": review_dt.isoformat(),
-            "state": 0,
+            "review_datetime": review_dt.isoformat(),
+            "review_duration": r["time"] if r["time"] else 0,
         }
         results.append((r["cid"], json.dumps(log)))
     return results
@@ -1092,18 +1093,17 @@ def get_all_review_log_jsons(conn: sqlite3.Connection) -> list[tuple[int, str]]:
 def get_review_logs_for_card(conn: sqlite3.Connection, card_id: int) -> list[str]:
     """Get review log JSONs for a card, ordered by review time."""
     rows = conn.execute(
-        "SELECT id, ease, ivl, lastIvl FROM revlog WHERE cid = ? ORDER BY id",
+        "SELECT id, ease, ivl, lastIvl, time FROM revlog WHERE cid = ? ORDER BY id",
         (card_id,),
     ).fetchall()
     results: list[str] = []
     for r in rows:
         review_dt = datetime.fromtimestamp(r["id"] / 1000, tz=UTC)
         log = {
+            "card_id": card_id,
             "rating": r["ease"],
-            "scheduled_days": r["ivl"],
-            "elapsed_days": r["lastIvl"],
-            "review": review_dt.isoformat(),
-            "state": 0,
+            "review_datetime": review_dt.isoformat(),
+            "review_duration": r["time"] if r["time"] else 0,
         }
         results.append(json.dumps(log))
     return results
@@ -1129,9 +1129,9 @@ def list_tags(conn: sqlite3.Connection) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _deck_name_for_did(conn: sqlite3.Connection, did: int) -> str:
+def deck_name_for_did(conn: sqlite3.Connection, did: int) -> str:
     """Look up deck name from did via col.decks JSON."""
-    meta = _load_col_meta(conn)
+    meta = load_col_meta(conn)
     deck = meta.decks.get(str(did))
     if deck:
         return str(deck.get("name", "Unknown"))

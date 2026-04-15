@@ -3,33 +3,38 @@
 Both CLI and (future) MCP call these functions. No CLI or MCP dependencies.
 """
 
-import hashlib
+import json as _json
 import re
+import shutil
 import sqlite3
+import time
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from spacedrep import db, fsrs_engine
+from spacedrep.anki_schema import ANKI_SCHEMA, CLOZE_MODEL_ID, ColMeta, basic_guid, cloze_guid
 from spacedrep.models import (
     BulkAddResult,
     BulkCardInput,
     CardDetail,
     CardDue,
     CardListResult,
-    CardRecord,
     CardSource,
     ClozeAddResult,
     DeckInfo,
     DueCount,
     FsrsStatus,
     ImportResult,
+    OpenResult,
     OptimizeResult,
     OverallStats,
     ReviewHistory,
     ReviewInput,
     ReviewPreview,
     ReviewResult,
+    SaveResult,
     SessionStats,
 )
 
@@ -200,7 +205,6 @@ _params_loaded = False
 
 def _ensure_params_loaded(conn: sqlite3.Connection) -> None:
     """Load FSRS parameters from config table on first connection."""
-    import json
     import sqlite3 as _sqlite3
 
     global _params_loaded
@@ -212,7 +216,7 @@ def _ensure_params_loaded(conn: sqlite3.Connection) -> None:
     except _sqlite3.OperationalError:
         return  # config table doesn't exist yet (fresh DB before init)
     if params_json is not None:
-        params: list[float] = json.loads(params_json)  # type: ignore[assignment]  # json.loads returns Any
+        params: list[float] = _json.loads(params_json)  # type: ignore[assignment]  # json.loads returns Any
         fsrs_engine.update_scheduler(params)
 
 
@@ -330,11 +334,6 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
         )
 
 
-def _basic_note_id(question: str, deck: str) -> int:
-    """Generate a deterministic source_note_id for basic cards."""
-    return int(hashlib.sha256(f"{question}\x1f{deck}".encode()).hexdigest()[:15], 16)
-
-
 def add_card(
     db_path: Path,
     question: str,
@@ -349,18 +348,16 @@ def add_card(
     if not answer.strip():
         raise EmptyFieldError("answer")
     with _open_db(db_path) as conn:
-        deck_id = db.upsert_deck(conn, deck)
-        note_id = _basic_note_id(question, deck)
-        card = CardRecord(
-            deck_id=deck_id,
+        guid = basic_guid(question, deck)
+        card_id, was_update = db.insert_card(
+            conn,
             question=question,
             answer=answer,
+            deck_name=deck,
             tags=tags,
             source=source,
-            source_note_id=note_id,
-            source_card_ord=0,
+            guid=guid,
         )
-        card_id, was_update = db.insert_card(conn, card)
         conn.commit()
         return {"card_id": card_id, "deck": deck, "was_update": was_update}
 
@@ -370,25 +367,23 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
     with _open_db(db_path) as conn:
         created: list[int] = []
         for card_input in cards:
-            deck_id = db.upsert_deck(conn, card_input.deck)
             if card_input.type == "cloze":
-                note_id = _cloze_note_id(card_input.question)
+                guid = cloze_guid(card_input.question)
                 card_ids = _expand_cloze(
-                    conn, card_input.question, deck_id, card_input.tags, note_id
+                    conn, card_input.question, card_input.deck, card_input.tags, guid
                 )
                 created.extend(card_ids)
             else:
-                note_id = _basic_note_id(card_input.question, card_input.deck)
-                card = CardRecord(
-                    deck_id=deck_id,
+                guid = basic_guid(card_input.question, card_input.deck)
+                card_id, _ = db.insert_card(
+                    conn,
                     question=card_input.question,
                     answer=card_input.answer,
+                    deck_name=card_input.deck,
                     tags=card_input.tags,
                     source="manual",
-                    source_note_id=note_id,
-                    source_card_ord=0,
+                    guid=guid,
                 )
-                card_id, _ = db.insert_card(conn, card)
                 created.append(card_id)
         conn.commit()
         return BulkAddResult(created=created, count=len(created))
@@ -397,73 +392,82 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
 _CLOZE_PATTERN = re.compile(r"\{\{c(\d+)::(.+?)(?:::.*?)?\}\}", re.DOTALL)
 
 
-def _is_cloze_card(conn: sqlite3.Connection, card_id: int) -> bool:
-    """Check if a card is part of a cloze note by looking for _cloze_source in extra_fields."""
-    import json as _json
-
-    row = conn.execute("SELECT extra_fields FROM cards WHERE id = ?", (card_id,)).fetchone()
-    if row is None or row["extra_fields"] is None:
-        return False
-    extra = _json.loads(row["extra_fields"])
-    return "_cloze_source" in extra
-
-
-def _cloze_note_id(text: str) -> int:
-    """Generate a deterministic source_note_id from cloze text."""
-    return int(hashlib.sha256(text.encode()).hexdigest()[:15], 16)
-
-
 def _expand_cloze(
     conn: sqlite3.Connection,
     text: str,
-    deck_id: int,
+    deck_name: str,
     tags: str,
-    source_note_id: int,
+    guid: str,
 ) -> list[int]:
-    """Expand cloze text into N cards. Returns list of card IDs."""
-    from spacedrep.anki_render import render_cloze
-
+    """Expand cloze text into 1 note + N cards (Anki style). Returns list of card IDs."""
     cloze_nums = sorted({int(m[0]) for m in _CLOZE_PATTERN.findall(text) if int(m[0]) >= 1})
     if not cloze_nums:
         raise NoClozeMarkersError()
 
-    card_ids: list[int] = []
-    ordinals: set[int] = set()
-    for num in cloze_nums:
-        card_ord = num - 1
-        ordinals.add(card_ord)
-        question, answer = render_cloze(text, card_ord)
+    now = int(time.time())
+    meta = db.load_col_meta(conn)
+    did = meta.ensure_deck(deck_name)
+    mid = meta.ensure_model("cloze")
+    db.save_col_meta(conn, meta)
 
-        # Preserve suspended status for existing cards (e.g. leech auto-suspend)
-        existing_row = conn.execute(
-            "SELECT suspended FROM cards WHERE source_note_id = ? AND source_card_ord = ?",
-            (source_note_id, card_ord),
-        ).fetchone()
-        is_suspended = bool(existing_row["suspended"]) if existing_row else False
+    note_flds = f"{text}\x1f"
+    new_ordinals = {num - 1 for num in cloze_nums}
 
-        card = CardRecord(
-            deck_id=deck_id,
-            question=question,
-            answer=answer,
-            extra_fields={"_cloze_source": text},
-            tags=tags,
-            source="generated",
-            source_note_id=source_note_id,
-            source_card_ord=card_ord,
-            suspended=is_suspended,
+    # Check for existing note (dedup on guid)
+    existing = conn.execute("SELECT id FROM notes WHERE guid = ?", (guid,)).fetchone()
+    if existing:
+        note_id = int(existing["id"])
+        conn.execute(
+            "UPDATE notes SET flds=?, sfld=?, tags=?, mod=?, usn=-1 WHERE id=?",
+            (note_flds, text, tags, now, note_id),
         )
-        card_id, _ = db.insert_card(conn, card)
-        card_ids.append(card_id)
+        # Get existing card ordinals
+        existing_cards = conn.execute(
+            "SELECT id, ord FROM cards WHERE nid = ?", (note_id,)
+        ).fetchall()
+        existing_ords = {int(r["ord"]): int(r["id"]) for r in existing_cards}
 
-    # Orphan cleanup: delete cards from this note with ordinals not in the new set
-    existing = conn.execute(
-        "SELECT id, source_card_ord FROM cards WHERE source_note_id = ?",
-        (source_note_id,),
-    ).fetchall()
-    for row in existing:
-        if row["source_card_ord"] not in ordinals:
-            db.delete_card(conn, row["id"])
+        # Delete orphan cards (ordinals not in the new set)
+        for ord_val, cid in existing_ords.items():
+            if ord_val not in new_ordinals:
+                db.delete_card(conn, cid)
 
+        # Add missing cards
+        card_ids: list[int] = []
+        pos_row = conn.execute("SELECT MAX(due) AS maxdue FROM cards WHERE type = 0").fetchone()
+        position = (
+            (int(pos_row["maxdue"]) + 1) if (pos_row and pos_row["maxdue"] is not None) else 0
+        )
+        for ord_val in sorted(new_ordinals):
+            if ord_val in existing_ords:
+                card_ids.append(existing_ords[ord_val])
+            else:
+                card_id = db.next_id()
+                conn.execute(
+                    "INSERT INTO cards"
+                    " (id, nid, did, ord, mod, usn, type, queue, due, ivl,"
+                    "  factor, reps, lapses, left, odue, odid, flags, data)"
+                    " VALUES (?, ?, ?, ?, ?, -1, 0, 0, ?, 0, 2500, 0, 0, 0, 0, 0, 0, '')",
+                    (card_id, note_id, did, ord_val, now, position),
+                )
+                position += 1
+                card_ids.append(card_id)
+        return card_ids
+
+    # Insert new note
+    note_id = db.next_id()
+    conn.execute(
+        "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)"
+        " VALUES (?, ?, ?, ?, -1, ?, ?, ?, 0, 0, '')",
+        (note_id, guid, mid, now, tags, note_flds, text),
+    )
+
+    # Insert N cards
+    card_ids = db.insert_cloze_cards(
+        conn, note_id=note_id, did=did, cloze_count=len(cloze_nums), now=now
+    )
+
+    db.invalidate_model_cache(conn)
     return card_ids
 
 
@@ -477,11 +481,13 @@ def add_cloze_note(
     if not _CLOZE_PATTERN.search(text):
         raise NoClozeMarkersError()
 
-    note_id = _cloze_note_id(text)
+    guid = cloze_guid(text)
     with _open_db(db_path) as conn:
-        deck_id = db.upsert_deck(conn, deck)
-        card_ids = _expand_cloze(conn, text, deck_id, tags, note_id)
+        card_ids = _expand_cloze(conn, text, deck, tags, guid)
         conn.commit()
+        # Use the note id from the first card
+        note_row = conn.execute("SELECT nid FROM cards WHERE id = ?", (card_ids[0],)).fetchone()
+        note_id = int(note_row["nid"]) if note_row else 0
         return ClozeAddResult(
             note_id=note_id, card_ids=card_ids, card_count=len(card_ids), deck=deck
         )
@@ -498,27 +504,34 @@ def update_cloze_note(
         raise NoClozeMarkersError()
 
     with _open_db(db_path) as conn:
+        # Find the note via the card
         row = conn.execute(
-            "SELECT source_note_id, tags, deck_id FROM cards WHERE id = ?",
+            "SELECT c.nid, n.tags, n.mid, c.did FROM cards c JOIN notes n ON n.id = c.nid"
+            " WHERE c.id = ?",
             (card_id,),
         ).fetchone()
         if row is None:
             raise CardNotFoundError(card_id)
-        if row["source_note_id"] is None or not _is_cloze_card(conn, card_id):
+
+        # Check if it's a cloze model
+        if int(row["mid"]) != CLOZE_MODEL_ID:
             raise NotAClozeNoteError(card_id)
 
-        source_note_id: int = row["source_note_id"]
+        note_id: int = int(row["nid"])
         effective_tags = tags if tags is not None else row["tags"]
-        deck_id: int = row["deck_id"]
+        did: int = int(row["did"])
 
         # Resolve deck name for the result
-        deck_row = conn.execute("SELECT name FROM decks WHERE id = ?", (deck_id,)).fetchone()
-        deck_name: str = deck_row["name"] if deck_row else "Default"
+        deck_name = db.deck_name_for_did(conn, did)
 
-        card_ids = _expand_cloze(conn, text, deck_id, effective_tags, source_note_id)
+        # Get the guid of the existing note for dedup
+        guid_row = conn.execute("SELECT guid FROM notes WHERE id = ?", (note_id,)).fetchone()
+        guid: str = guid_row["guid"] if guid_row else cloze_guid(text)
+
+        card_ids = _expand_cloze(conn, text, deck_name, effective_tags, guid)
         conn.commit()
         return ClozeAddResult(
-            note_id=source_note_id,
+            note_id=note_id,
             card_ids=card_ids,
             card_count=len(card_ids),
             deck=deck_name,
@@ -534,7 +547,6 @@ def list_cards(
     leeches_only: bool = False,
     search: str | None = None,
     suspended: bool | None = None,
-    source: str | None = None,
     due_before: str | None = None,
     due_after: str | None = None,
     created_before: str | None = None,
@@ -565,7 +577,6 @@ def list_cards(
             leech_threshold=leech_threshold,
             search=search,
             suspended=suspended,
-            source=source,
             due_before=due_before,
             due_after=due_after,
             created_before=created_before,
@@ -612,13 +623,10 @@ def preview_review(db_path: Path, card_id: int) -> ReviewPreview:
         if fsrs_card is None:
             raise CardNotFoundError(card_id)
 
-        # Get current state info for the response
-        row = conn.execute(
-            "SELECT state, last_review FROM fsrs_state WHERE card_id = ?", (card_id,)
-        ).fetchone()
-        from fsrs import State
-
-        current_state = fsrs_engine.state_name(State(row["state"]), row["last_review"])
+        # Get current state from card columns
+        row = conn.execute("SELECT type, data FROM cards WHERE id = ?", (card_id,)).fetchone()
+        lrt = db.get_last_review_ts(row["data"]) if row else None
+        current_state = db.card_state_name(row["type"], lrt)
 
         previews: dict[str, RatingPreview] = {}
         for rating_int, updated, _log in fsrs_engine.preview_card(fsrs_card):
@@ -798,20 +806,16 @@ def import_deck(
     first_deck = decks[0].name if decks else "Unknown"
 
     if dry_run:
-        # Count how many would be new vs updated without writing
         with _open_db(db_path) as conn:
             would_import = 0
             would_update = 0
             for card in cards:
-                if card.source_note_id is not None:
-                    existing = conn.execute(
-                        "SELECT 1 FROM cards WHERE source_note_id = ? AND source_card_ord = ?",
-                        (card.source_note_id, card.source_card_ord),
-                    ).fetchone()
-                    if existing:
-                        would_update += 1
-                    else:
-                        would_import += 1
+                card_guid = card.source_note_guid or basic_guid(card.question, first_deck)
+                existing = conn.execute(
+                    "SELECT 1 FROM notes WHERE guid = ?", (card_guid,)
+                ).fetchone()
+                if existing:
+                    would_update += 1
                 else:
                     would_import += 1
             return ImportResult(
@@ -828,20 +832,24 @@ def import_deck(
         imported = 0
         updated = 0
 
-        for deck_rec in decks:
-            db.upsert_deck(conn, deck_rec.name, deck_rec.source_id)
-
         for card in cards:
-            # Resolve per-card deck from the (note_id, ord)→deck mapping
+            # Resolve per-card deck from the (note_id, ord)->deck mapping
             note_id = card.source_note_id
             if note_id is not None and (note_id, card.source_card_ord) in note_deck_map:
                 card_deck = note_deck_map[(note_id, card.source_card_ord)]
             else:
                 card_deck = first_deck
-            deck_id = db.upsert_deck(conn, card_deck)
-            card.deck_id = deck_id
 
-            _, was_update = db.insert_card(conn, card)
+            card_guid = card.source_note_guid or basic_guid(card.question, card_deck)
+            _, was_update = db.insert_card(
+                conn,
+                question=card.question,
+                answer=card.answer,
+                deck_name=card_deck,
+                tags=card.tags,
+                source="apkg",
+                guid=card_guid,
+            )
             if was_update:
                 updated += 1
             else:
@@ -871,25 +879,141 @@ def export_deck(
 ) -> int:
     """Export cards to an .apkg file. Returns count of exported cards.
 
-    Filters by deck, tags, state, search, suspended, source, or buried.
-    Non-existent deck returns 0 exported.
+    Deprecated: use save_deck instead. This will be removed in a future version.
     """
-    from spacedrep.apkg_writer import write_apkg
+    raise NotImplementedError(
+        "export_deck is deprecated in the Anki-native schema. Use save_deck() instead."
+    )
 
-    _validate_state(state)
-    with _open_db(db_path) as conn:
-        cards = db.get_filtered_cards(
-            conn,
-            deck=deck,
-            tags=tags,
-            state=state,
-            search=search,
-            suspended=suspended,
-            source=source,
-            buried=buried,
+
+def open_deck(db_path: Path, apkg_path: Path, *, force: bool = False) -> OpenResult:
+    """Extract an .apkg ZIP and copy the SQLite DB to db_path, adding extension tables.
+
+    If db_path already exists with cards and force is False, raises an error.
+    """
+    if not apkg_path.exists():
+        raise ApkgImportError(f"File not found: {apkg_path}")
+    if apkg_path.suffix.lower() != ".apkg":
+        raise ApkgImportError(
+            f"Expected .apkg file, got '{apkg_path.suffix or 'no extension'}': {apkg_path.name}"
         )
-        deck_recs = db.get_deck_records(conn)
-        return write_apkg(cards, deck_recs, output_path)
+
+    # Check if target db exists and has cards
+    if db_path.exists() and not force:
+        try:
+            conn = db.get_connection(db_path)
+            card_count = conn.execute("SELECT COUNT(*) AS cnt FROM cards").fetchone()
+            conn.close()
+            if card_count and card_count["cnt"] > 0:
+                raise ApkgImportError(
+                    f"Database {db_path} already has {card_count['cnt']} cards. "
+                    "Use force=True to overwrite."
+                )
+        except sqlite3.OperationalError:
+            pass  # No cards table -- safe to overwrite
+
+    # Extract the .apkg ZIP
+    try:
+        with zipfile.ZipFile(str(apkg_path), "r") as zf:
+            names = zf.namelist()
+            # Anki 2.1+ uses collection.anki21, older uses collection.anki2
+            collection_name: str | None = None
+            for candidate in ("collection.anki21", "collection.anki2"):
+                if candidate in names:
+                    collection_name = candidate
+                    break
+            if collection_name is None:
+                raise ApkgImportError(
+                    f"No collection database found in {apkg_path.name}. "
+                    "Expected collection.anki21 or collection.anki2."
+                )
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zf.extract(collection_name, tmpdir)
+                extracted = Path(tmpdir) / collection_name
+                shutil.copy2(str(extracted), str(db_path))
+    except zipfile.BadZipFile as e:
+        raise ApkgImportError(f"Invalid .apkg file: {e}") from e
+
+    # Add extension tables to the copied database
+    conn = db.get_connection(db_path)
+    try:
+        conn.executescript(ANKI_SCHEMA)
+        # Ensure col row exists (it should from the .apkg)
+        col_exists = conn.execute("SELECT id FROM col WHERE id = 1").fetchone()
+        if col_exists is None:
+            meta = ColMeta.default()
+            row = meta.to_col_row()
+            conn.execute(
+                "INSERT INTO col"
+                " (id, crt, mod, scm, ver, dty, usn, ls,"
+                " conf, models, decks, dconf, tags)"
+                " VALUES (:id, :crt, :mod, :scm, :ver, :dty, :usn, :ls,"
+                " :conf, :models, :decks, :dconf, :tags)",
+                row,
+            )
+        # Count cards and decks
+        card_count = conn.execute("SELECT COUNT(*) AS cnt FROM cards").fetchone()
+        deck_count_row = conn.execute("SELECT decks FROM col WHERE id = 1").fetchone()
+        deck_count = 0
+        deck_names: list[str] = []
+        if deck_count_row:
+            decks_json = _json.loads(deck_count_row["decks"])
+            deck_count = len(decks_json)
+            deck_names = [
+                str(d.get("name", "Unknown"))
+                for d in decks_json.values()
+                if str(d.get("name", "")) != "Default" or deck_count == 1
+            ]
+        conn.commit()
+    finally:
+        conn.close()
+
+    return OpenResult(
+        db_path=str(db_path),
+        card_count=int(card_count["cnt"]) if card_count else 0,
+        deck_count=deck_count,
+        decks=deck_names,
+    )
+
+
+def save_deck(db_path: Path, output_path: Path) -> SaveResult:
+    """Copy the working SQLite DB and ZIP it as an .apkg.
+
+    The .apkg contains collection.anki21 + a media file ({}).
+    """
+    if not db_path.exists():
+        raise DatabaseNotFoundError(db_path)
+
+    # Count cards before packaging
+    conn = db.get_connection(db_path)
+    try:
+        card_count = conn.execute("SELECT COUNT(*) AS cnt FROM cards").fetchone()
+        count = int(card_count["cnt"]) if card_count else 0
+    finally:
+        conn.close()
+
+    # Create a clean copy without extension tables for Anki compatibility
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_db = Path(tmpdir) / "collection.anki21"
+        shutil.copy2(str(db_path), str(tmp_db))
+
+        # Write media file (empty JSON object)
+        media_path = Path(tmpdir) / "media"
+        media_path.write_text("{}")
+
+        # Create ZIP
+        with zipfile.ZipFile(str(output_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(str(tmp_db), "collection.anki21")
+            zf.write(str(media_path), "media")
+
+    return SaveResult(
+        output_path=str(output_path),
+        card_count=count,
+    )
 
 
 def list_decks(db_path: Path) -> list[DeckInfo]:
@@ -928,7 +1052,7 @@ def _reschedule_all_cards(conn: sqlite3.Connection) -> int:
     from fsrs import ReviewLog as FsrsReviewLog
 
     scheduler = fsrs_engine.get_scheduler()
-    card_ids = conn.execute("SELECT DISTINCT card_id FROM review_logs").fetchall()
+    card_ids = conn.execute("SELECT DISTINCT cid AS card_id FROM revlog").fetchall()
     count = 0
 
     for row in card_ids:
@@ -951,8 +1075,6 @@ def optimize_parameters(
     db_path: Path, *, reschedule: bool = False, dry_run: bool = False
 ) -> OptimizeResult:
     """Optimize FSRS parameters from review history."""
-    import json as _json
-
     try:
         from fsrs import Optimizer
     except ImportError:
@@ -1013,9 +1135,7 @@ def optimize_parameters(
 def get_fsrs_status(db_path: Path) -> FsrsStatus:
     """Get current FSRS scheduler status."""
     with _open_db(db_path) as conn:
-        review_count = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM review_logs WHERE fsrs_log_json IS NOT NULL"
-        ).fetchone()["cnt"]
+        review_count = conn.execute("SELECT COUNT(*) AS cnt FROM revlog").fetchone()["cnt"]
         return FsrsStatus(
             parameters=list(fsrs_engine.get_current_parameters()),
             is_default=fsrs_engine.is_default_parameters(),

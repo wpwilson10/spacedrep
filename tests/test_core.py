@@ -40,6 +40,25 @@ def test_add_card_dedup_same_deck(tmp_db: Path) -> None:
     assert detail.answer == "Updated answer"
 
 
+def test_add_card_dedup_preserves_tags(tmp_db: Path) -> None:
+    """Re-adding a card without specifying tags preserves existing tags."""
+    r1 = core.add_card(tmp_db, "What is X?", "Answer", deck="Test", tags="t1 t2")
+    detail1 = core.get_card_detail(tmp_db, int(r1["card_id"]))
+    assert detail1.tags == "t1 t2"
+
+    # Re-add without tags — existing tags should be preserved
+    r2 = core.add_card(tmp_db, "What is X?", "Updated answer", deck="Test")
+    assert r2["was_update"] is True
+    detail2 = core.get_card_detail(tmp_db, int(r2["card_id"]))
+    assert detail2.tags == "t1 t2"
+    assert detail2.answer == "Updated answer"
+
+    # Re-add with explicit new tags — tags should update
+    r3 = core.add_card(tmp_db, "What is X?", "Updated answer", deck="Test", tags="t3")
+    detail3 = core.get_card_detail(tmp_db, int(r3["card_id"]))
+    assert detail3.tags == "t3"
+
+
 def test_add_card_dedup_different_deck(tmp_db: Path) -> None:
     """Same question in different decks creates separate cards."""
     r1 = core.add_card(tmp_db, "What is X?", "A1", deck="DeckA")

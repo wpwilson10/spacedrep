@@ -264,10 +264,18 @@ def insert_card(
     existing = conn.execute("SELECT id FROM notes WHERE guid = ?", (guid,)).fetchone()
     if existing:
         note_id = int(existing["id"])
-        conn.execute(
-            "UPDATE notes SET flds=?, sfld=?, tags=?, mod=?, usn=-1 WHERE id=?",
-            (note_flds, sfld, tags, now, note_id),
-        )
+        if tags:
+            # Explicit tags provided — update them
+            conn.execute(
+                "UPDATE notes SET flds=?, sfld=?, tags=?, mod=?, usn=-1 WHERE id=?",
+                (note_flds, sfld, tags, now, note_id),
+            )
+        else:
+            # Empty tags = "not specified"; preserve existing. Use update_card to clear.
+            conn.execute(
+                "UPDATE notes SET flds=?, sfld=?, mod=?, usn=-1 WHERE id=?",
+                (note_flds, sfld, now, note_id),
+            )
         # Update card's deck if changed
         conn.execute("UPDATE cards SET did=?, mod=?, usn=-1 WHERE nid=?", (did, now, note_id))
 
@@ -1306,20 +1314,33 @@ def _build_card_filter_clauses(
         except ValueError:
             pass
 
+    # FSRS property expressions with fallbacks for unreviewed cards.
+    # Matches display logic in anki_schema.anki_fields_to_fsrs_card():
+    # - difficulty: from data JSON, else SM-2 factor estimate, else 5.0
+    # - stability: from data JSON, else 0.0 (unreviewed)
+    _diff_expr = (
+        "(CASE WHEN c.data != '' AND json_extract(c.data, '$.d') IS NOT NULL"
+        " THEN json_extract(c.data, '$.d')"
+        " WHEN c.factor > 0"
+        " THEN MAX(1.0, MIN(10.0, 10.0 - CAST(c.factor AS REAL) / 500.0))"
+        " ELSE 5.0 END)"
+    )
+    _stab_expr = "COALESCE(CASE WHEN c.data != '' THEN json_extract(c.data, '$.s') END, 0.0)"
+
     if min_difficulty is not None:
-        clauses.append("AND c.data != '' AND json_extract(c.data, '$.d') >= ?")
+        clauses.append(f"AND {_diff_expr} >= ?")
         params.append(min_difficulty)
 
     if max_difficulty is not None:
-        clauses.append("AND c.data != '' AND json_extract(c.data, '$.d') <= ?")
+        clauses.append(f"AND {_diff_expr} <= ?")
         params.append(max_difficulty)
 
     if min_stability is not None:
-        clauses.append("AND c.data != '' AND json_extract(c.data, '$.s') >= ?")
+        clauses.append(f"AND {_stab_expr} >= ?")
         params.append(min_stability)
 
     if max_stability is not None:
-        clauses.append("AND c.data != '' AND json_extract(c.data, '$.s') <= ?")
+        clauses.append(f"AND {_stab_expr} <= ?")
         params.append(max_stability)
 
     # Retrievability filters: computed in Python (skip for now — too complex for SQL)

@@ -1,6 +1,6 @@
 [project]
 name = "spacedrep"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.12"
 description = "Agent-first flashcard CLI with FSRS scheduling and .apkg support"
 license = "MIT"

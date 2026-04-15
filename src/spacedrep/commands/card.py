@@ -140,7 +140,7 @@ def list_cards(
     ),
     leeches: bool = typer.Option(False, "--leeches", help="Show only leech cards"),
     suspended: bool | None = typer.Option(None, help="Filter by suspended status"),
-    buried: bool | None = typer.Option(None, "--buried", help="Filter by buried status"),
+    buried: bool | None = typer.Option(None, help="Filter by buried status"),
     due_before: str | None = typer.Option(
         None, "--due-before", help="Cards due before this datetime (ISO format)"
     ),

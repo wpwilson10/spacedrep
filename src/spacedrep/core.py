@@ -842,7 +842,7 @@ def open_deck(db_path: Path, apkg_path: Path, *, force: bool = False) -> OpenRes
             if card_count and card_count["cnt"] > 0:
                 raise ApkgImportError(
                     f"Database {db_path} already has {card_count['cnt']} cards. "
-                    "Use force=True to overwrite."
+                    "Use the force option to overwrite."
                 )
         except sqlite3.OperationalError:
             pass  # No cards table -- safe to overwrite
@@ -896,11 +896,7 @@ def open_deck(db_path: Path, apkg_path: Path, *, force: bool = False) -> OpenRes
         if deck_count_row:
             decks_json = _json.loads(deck_count_row["decks"])
             deck_count = len(decks_json)
-            deck_names = [
-                str(d.get("name", "Unknown"))
-                for d in decks_json.values()
-                if str(d.get("name", "")) != "Default" or deck_count == 1
-            ]
+            deck_names = [str(d.get("name", "Unknown")) for d in decks_json.values()]
         conn.commit()
     finally:
         conn.close()

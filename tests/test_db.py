@@ -795,6 +795,40 @@ def test_fsrs_property_filter_difficulty(populated_db: Path) -> None:
     conn.close()
 
 
+def test_fsrs_property_filter_includes_unreviewed(populated_db: Path) -> None:
+    """Unreviewed cards with default difficulty=5.0 should appear in difficulty filters."""
+    conn = db.get_connection(populated_db)
+
+    # All cards are unreviewed — default difficulty is 5.0 (from factor=2500)
+    cards = db.list_cards(conn)
+    assert cards.total > 0
+    card_id = cards.cards[0].card_id
+
+    # Verify the card detail reports difficulty 5.0
+    detail = db.get_card_detail(conn, card_id)
+    assert detail is not None
+    assert detail.difficulty == 5.0
+
+    # min_difficulty=4.9 should include unreviewed cards
+    result = db.list_cards(conn, min_difficulty=4.9)
+    assert result.total > 0
+    assert card_id in {c.card_id for c in result.cards}
+
+    # min_difficulty=5.1 should exclude them
+    result = db.list_cards(conn, min_difficulty=5.1)
+    assert card_id not in {c.card_id for c in result.cards}
+
+    # max_difficulty=5.1 should include them
+    result = db.list_cards(conn, max_difficulty=5.1)
+    assert card_id in {c.card_id for c in result.cards}
+
+    # min_stability=0.0 should include unreviewed cards (stability defaults to 0)
+    result = db.list_cards(conn, min_stability=0.0)
+    assert card_id in {c.card_id for c in result.cards}
+
+    conn.close()
+
+
 def test_bury_card(populated_db: Path) -> None:
     conn = db.get_connection(populated_db)
     cards = db.list_cards(conn)

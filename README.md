@@ -21,8 +21,8 @@ Optional extras: `spacedrep[mcp]` for the MCP server, `spacedrep[optimizer]` for
 ```bash
 spacedrep db init
 spacedrep card add "What is CAP theorem?" "Pick 2 of 3: consistency, availability, partition tolerance" --deck AWS
-spacedrep card next
-spacedrep review submit 1 good
+spacedrep card next                          # shows the card and its ID
+spacedrep review submit <card_id> good       # use the card_id from card next
 ```
 
 Cloze deletions — one note, multiple cards:
@@ -113,7 +113,7 @@ claude mcp add spacedrep -e SPACEDREP_DB=/path/to/collection.anki21 -- uv run --
       "command": "uv",
       "args": ["run", "--directory", "/path/to/spacedrep", "spacedrep-mcp"],
       "env": {
-        "SPACEDREP_DB": "/path/to/reviews.db"
+        "SPACEDREP_DB": "/path/to/collection.anki21"
       }
     }
   }

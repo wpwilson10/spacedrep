@@ -873,3 +873,70 @@ def test_update_fsrs_state(populated_db: Path) -> None:
     assert fsrs_card.difficulty is not None
     assert fsrs_card.last_review is not None
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug fix regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_update_fsrs_state_clears_step(tmp_db: Path) -> None:
+    """step=0 should be written to clear stale step values."""
+    from fsrs import Card as FsrsCard
+
+    conn = db.get_connection(tmp_db)
+    card_id, _ = db.insert_card(
+        conn,
+        question="Step test",
+        answer="A",
+        deck_name="Test",
+        tags="",
+        guid=basic_guid("Step test", "Test"),
+    )
+
+    # Manually set step=2 in extension table
+    conn.execute(
+        "INSERT INTO spacedrep_card_extra (card_id, step) VALUES (?, ?)"
+        " ON CONFLICT(card_id) DO UPDATE SET step = excluded.step",
+        (card_id, 2),
+    )
+    conn.commit()
+
+    # Verify step=2
+    row = conn.execute(
+        "SELECT step FROM spacedrep_card_extra WHERE card_id = ?", (card_id,)
+    ).fetchone()
+    assert row["step"] == 2
+
+    # Update with a card that has step=0
+    fsrs_card = FsrsCard()
+    fsrs_card.step = 0
+    db.update_fsrs_state(conn, card_id, fsrs_card, 0.9)
+    conn.commit()
+
+    # Verify step=0 was written
+    row = conn.execute(
+        "SELECT step FROM spacedrep_card_extra WHERE card_id = ?", (card_id,)
+    ).fetchone()
+    assert row["step"] == 0
+    conn.close()
+
+
+def test_due_after_includes_new_cards(tmp_db: Path) -> None:
+    """due_after filter should include new cards (type=0)."""
+    conn = db.get_connection(tmp_db)
+    db.insert_card(
+        conn,
+        question="New card",
+        answer="A",
+        deck_name="Test",
+        tags="",
+        guid=basic_guid("New card", "Test"),
+    )
+    conn.commit()
+
+    # New card should appear when filtering due_after a past date
+    result = db.list_cards(conn, due_after="2020-01-01T00:00:00")
+    assert result.total == 1
+
+    conn.close()

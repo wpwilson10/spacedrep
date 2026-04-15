@@ -302,14 +302,24 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
         if review.rating == 1 and fsrs_card.state in (State.Review, State.Relearning):
             lapse_count = db.increment_lapse_count(conn, review.card_id)
             if lapse_count >= LEECH_THRESHOLD:
-                db.suspend_card(conn, review.card_id)
                 is_leech = True
 
         updated_card, review_log = fsrs_engine.review_card(fsrs_card, review.rating)
         retrievability = fsrs_engine.get_retrievability(updated_card)
 
         db.update_fsrs_state(conn, review.card_id, updated_card, retrievability)
-        db.insert_review_log(conn, review, review_log.to_json())
+        db.insert_review_log(
+            conn,
+            review,
+            review_log.to_json(),
+            updated_card=updated_card,
+            previous_card=fsrs_card,
+        )
+
+        # Suspend after update_fsrs_state so queue=-1 isn't overwritten
+        if is_leech:
+            db.suspend_card(conn, review.card_id)
+
         conn.commit()
 
         interval_days = 0.0
@@ -426,12 +436,9 @@ def _expand_cloze(
         ).fetchall()
         existing_ords = {int(r["ord"]): int(r["id"]) for r in existing_cards}
 
-        # Delete orphan cards (ordinals not in the new set)
-        for ord_val, cid in existing_ords.items():
-            if ord_val not in new_ordinals:
-                db.delete_card(conn, cid)
-
-        # Add missing cards
+        # Insert new cards first (before deleting orphans) to ensure the note
+        # always has at least one card — prevents auto-orphan-cleanup in
+        # delete_card from deleting the note when all ordinals change.
         card_ids: list[int] = []
         pos_row = conn.execute("SELECT MAX(due) AS maxdue FROM cards WHERE type = 0").fetchone()
         position = (
@@ -451,6 +458,12 @@ def _expand_cloze(
                 )
                 position += 1
                 card_ids.append(card_id)
+
+        # Delete orphan cards (ordinals not in the new set)
+        for ord_val, cid in existing_ords.items():
+            if ord_val not in new_ordinals:
+                db.delete_card(conn, cid)
+
         return card_ids
 
     # Insert new note
@@ -461,9 +474,9 @@ def _expand_cloze(
         (note_id, guid, mid, now, tags, note_flds, text),
     )
 
-    # Insert N cards
+    # Insert cards with correct ordinals (cloze num - 1)
     card_ids = db.insert_cloze_cards(
-        conn, note_id=note_id, did=did, cloze_count=len(cloze_nums), now=now
+        conn, note_id=note_id, did=did, ordinals=sorted(new_ordinals), now=now
     )
 
     db.invalidate_model_cache(conn)
@@ -917,11 +930,21 @@ def save_deck(db_path: Path, output_path: Path) -> SaveResult:
         conn.close()
 
     # Create a clean copy without extension tables for Anki compatibility
+    import sqlite3
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_db = Path(tmpdir) / "collection.anki21"
         shutil.copy2(str(db_path), str(tmp_db))
+
+        # Strip spacedrep extension tables so Anki sees a clean schema
+        tmp_conn = sqlite3.connect(str(tmp_db))
+        tmp_conn.execute("DROP TABLE IF EXISTS spacedrep_meta")
+        tmp_conn.execute("DROP TABLE IF EXISTS spacedrep_card_extra")
+        tmp_conn.execute("DROP TABLE IF EXISTS spacedrep_review_extra")
+        tmp_conn.commit()
+        tmp_conn.execute("VACUUM")
+        tmp_conn.close()
 
         # Write media file (empty JSON object)
         media_path = Path(tmpdir) / "media"

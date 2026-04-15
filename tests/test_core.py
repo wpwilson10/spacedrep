@@ -378,6 +378,7 @@ def test_leech_auto_suspends(tmp_db: Path) -> None:
     assert is_leech_result
     detail = core.get_card_detail(tmp_db, card_id)
     assert detail.lapse_count >= 8
+    assert detail.suspended is True
 
 
 def test_lapse_count_in_card_detail(tmp_db: Path) -> None:
@@ -909,3 +910,131 @@ def test_submit_review_after_unsuspend(tmp_db: Path) -> None:
     review = ReviewInput(card_id=card_id, rating=3)
     review_result = core.submit_review(tmp_db, review)
     assert review_result.rating == "good"
+
+
+# ---------------------------------------------------------------------------
+# Bug fix regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_revlog_interval_and_type(tmp_db: Path) -> None:
+    """revlog.ivl should reflect scheduled interval; revlog.type should reflect card state."""
+    from spacedrep import db
+
+    result = core.add_card(tmp_db, "Q", "A", deck="Test")
+    card_id = int(result["card_id"])
+
+    # First review (new/learning card) -> revlog.type should be 0 (learn)
+    review = ReviewInput(card_id=card_id, rating=3)
+    core.submit_review(tmp_db, review)
+
+    conn = db.get_connection(tmp_db)
+    row = conn.execute(
+        "SELECT ivl, lastIvl, type FROM revlog WHERE cid = ? ORDER BY id LIMIT 1",
+        (card_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["type"] == 0  # learn
+
+    # Move to Review state and review again -> revlog.type should be 1 (review)
+    _review_card_to_review_state(tmp_db, card_id)
+    detail = core.get_card_detail(tmp_db, card_id)
+    assert detail.state == "review"
+
+    review = ReviewInput(card_id=card_id, rating=3)
+    core.submit_review(tmp_db, review)
+
+    conn = db.get_connection(tmp_db)
+    row = conn.execute(
+        "SELECT ivl, lastIvl, type FROM revlog WHERE cid = ? ORDER BY id DESC LIMIT 1",
+        (card_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["type"] == 1  # review
+    assert row["ivl"] > 0  # should have a non-zero interval
+
+
+class TestClozeOrdinals:
+    def test_non_contiguous_ordinals(self, tmp_db: Path) -> None:
+        """Non-contiguous cloze numbers should produce correct ordinals."""
+        from spacedrep import db
+
+        result = core.add_cloze_note(tmp_db, "{{c2::X}} and {{c5::Y}}", deck="Test")
+        assert result.card_count == 2
+
+        conn = db.get_connection(tmp_db)
+        ords = [
+            r["ord"]
+            for r in conn.execute(
+                "SELECT ord FROM cards WHERE nid = ? ORDER BY ord",
+                (result.note_id,),
+            ).fetchall()
+        ]
+        conn.close()
+        assert ords == [1, 4]  # c2 -> ord=1, c5 -> ord=4
+
+    def test_update_all_ordinals_changed(self, tmp_db: Path) -> None:
+        """Changing all cloze ordinals should not corrupt the note."""
+        original = core.add_cloze_note(tmp_db, "{{c1::A}} and {{c2::B}}", deck="Test")
+        card_id = original.card_ids[0]
+
+        updated = core.update_cloze_note(tmp_db, card_id, "{{c3::X}} and {{c4::Y}}")
+        assert updated.card_count == 2
+
+        # Verify cards are accessible
+        for cid in updated.card_ids:
+            detail = core.get_card_detail(tmp_db, cid)
+            assert detail is not None
+            assert detail.deck == "Test"
+
+
+def test_save_deck_strips_extension_tables(tmp_db: Path) -> None:
+    """Exported .apkg should not contain spacedrep extension tables."""
+    import sqlite3
+    import tempfile
+    import zipfile
+
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "export.apkg"
+        core.save_deck(tmp_db, out)
+
+        # Extract and verify no extension tables
+        with zipfile.ZipFile(str(out)) as zf:
+            zf.extract("collection.anki21", tmpdir)
+
+        conn = sqlite3.connect(str(Path(tmpdir) / "collection.anki21"))
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'spacedrep%'"
+            ).fetchall()
+        }
+        conn.close()
+        assert len(tables) == 0
+
+
+def test_list_cards_retrievability_filter(tmp_db: Path) -> None:
+    """Retrievability filter should actually filter cards."""
+    result = core.add_card(tmp_db, "Q1", "A1", deck="Test")
+    card_id = int(result["card_id"])
+
+    # New card has retrievability=0, so min_retrievability=0.5 should exclude it
+    cards = core.list_cards(tmp_db, min_retrievability=0.5)
+    assert cards.total == 0
+
+    # Review the card to give it retrievability > 0
+    review = ReviewInput(card_id=card_id, rating=4)  # easy
+    core.submit_review(tmp_db, review)
+
+    # Now it should appear with min_retrievability=0.5
+    cards = core.list_cards(tmp_db, min_retrievability=0.5)
+    assert cards.total == 1
+
+    # But not with min_retrievability=1.1 (impossible value)
+    cards = core.list_cards(tmp_db, min_retrievability=1.1)
+    assert cards.total == 0

@@ -316,22 +316,22 @@ def insert_cloze_cards(
     *,
     note_id: int,
     did: int,
-    cloze_count: int,
+    ordinals: list[int],
     now: int,
 ) -> list[int]:
-    """Insert N card rows for a cloze note (one per ordinal). Returns card IDs."""
+    """Insert card rows for a cloze note (one per ordinal). Returns card IDs."""
     pos_row = conn.execute("SELECT MAX(due) AS maxdue FROM cards WHERE type = 0").fetchone()
     position = (int(pos_row["maxdue"]) + 1) if (pos_row and pos_row["maxdue"] is not None) else 0
 
     card_ids: list[int] = []
-    for i in range(cloze_count):
+    for idx, ord_val in enumerate(ordinals):
         card_id = next_id()
         conn.execute(
             "INSERT INTO cards"
             " (id, nid, did, ord, mod, usn, type, queue, due, ivl,"
             "  factor, reps, lapses, left, odue, odid, flags, data)"
             " VALUES (?, ?, ?, ?, ?, -1, 0, 0, ?, 0, 2500, 0, 0, 0, 0, 0, 0, '')",
-            (card_id, note_id, did, i, now, position + i),
+            (card_id, note_id, did, ord_val, now, position + idx),
         )
         card_ids.append(card_id)
     return card_ids
@@ -505,25 +505,44 @@ def list_cards(
         WHERE 1=1 {filter_sql}
     """
 
-    count_row = conn.execute(f"SELECT COUNT(*) AS cnt {base_from}", filter_params).fetchone()
-    total = int(count_row["cnt"]) if count_row else 0
+    needs_retrievability = min_retrievability is not None or max_retrievability is not None
 
-    data_query = f"""
+    select_cols = """
         SELECT c.id AS card_id, n.flds, n.mid, c.ord, n.tags,
-               c.type, c.data, c.did, c.queue, c.lapses,
-               sce.buried_until
-        {base_from}
-        ORDER BY c.id ASC
-        LIMIT ? OFFSET ?
+               c.type, c.due, c.data, c.did, c.queue, c.lapses,
+               c.ivl, c.factor, sce.buried_until, sce.step
     """
-    data_params: list[Any] = [*filter_params, limit, offset]
-    rows = conn.execute(data_query, data_params).fetchall()
+
+    if needs_retrievability:
+        # Fetch all matching rows, filter by retrievability in Python, then paginate
+        data_query = f"{select_cols} {base_from} ORDER BY c.id ASC"
+        all_rows = conn.execute(data_query, filter_params).fetchall()
+
+        filtered_rows: list[sqlite3.Row] = []
+        for r in all_rows:
+            fsrs_card = anki_fields_to_fsrs_card(dict(r), crt)
+            ret = fsrs_engine.get_retrievability(fsrs_card)
+            if min_retrievability is not None and ret < min_retrievability:
+                continue
+            if max_retrievability is not None and ret > max_retrievability:
+                continue
+            filtered_rows.append(r)
+
+        total = len(filtered_rows)
+        rows = filtered_rows[offset : offset + limit]
+    else:
+        count_row = conn.execute(f"SELECT COUNT(*) AS cnt {base_from}", filter_params).fetchone()
+        total = int(count_row["cnt"]) if count_row else 0
+
+        data_query = f"{select_cols} {base_from} ORDER BY c.id ASC LIMIT ? OFFSET ?"
+        data_params: list[Any] = [*filter_params, limit, offset]
+        rows = conn.execute(data_query, data_params).fetchall()
 
     cards: list[CardSummary] = []
     for r in rows:
         question, _, _ = _render_from_row(r, models)
         lrt = get_last_review_ts(r["data"])
-        due_dt = due_to_datetime(int(r["due"]) if "due" in dict(r) else 0, r["type"], crt)
+        due_dt = due_to_datetime(r["due"], r["type"], crt)
         cards.append(
             CardSummary(
                 card_id=r["card_id"],
@@ -797,13 +816,13 @@ def update_fsrs_state(
         ),
     )
 
-    # Update step in extension table
-    if fsrs_card.step is not None and fsrs_card.step > 0:
-        conn.execute(
-            "INSERT INTO spacedrep_card_extra (card_id, step) VALUES (?, ?)"
-            " ON CONFLICT(card_id) DO UPDATE SET step = excluded.step",
-            (card_id, fsrs_card.step),
-        )
+    # Update step in extension table (always write, including 0, to clear stale values)
+    step_val = fsrs_card.step if fsrs_card.step is not None else 0
+    conn.execute(
+        "INSERT INTO spacedrep_card_extra (card_id, step) VALUES (?, ?)"
+        " ON CONFLICT(card_id) DO UPDATE SET step = excluded.step",
+        (card_id, step_val),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -815,21 +834,34 @@ def insert_review_log(
     conn: sqlite3.Connection,
     review: ReviewInput,
     fsrs_log_json: str,
+    *,
+    updated_card: Card | None = None,
+    previous_card: Card | None = None,
 ) -> None:
     """Insert a review into revlog + spacedrep_review_extra."""
     now_ms = next_id()
 
-    # Parse fsrs log for ivl/lastIvl
-    try:
-        log_data = json.loads(fsrs_log_json)
-        ivl = int(log_data.get("scheduled_days", 0))
-        last_ivl = int(log_data.get("elapsed_days", 0))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        ivl = 0
-        last_ivl = 0
+    # Compute ivl (new interval) from updated card's scheduled due date
+    ivl = 0
+    if updated_card and updated_card.due and updated_card.last_review:
+        delta = updated_card.due - updated_card.last_review
+        ivl = max(0, round(delta.total_seconds() / 86400))
 
-    # Determine revlog type from rating context
-    revlog_type = 0  # 0=learn
+    # Compute lastIvl (previous interval) from previous card state
+    last_ivl = 0
+    if previous_card and previous_card.due and previous_card.last_review:
+        delta = previous_card.due - previous_card.last_review
+        last_ivl = max(0, round(delta.total_seconds() / 86400))
+
+    # Determine revlog type from card state before review: 0=learn, 1=review, 2=relearn
+    revlog_type = 0
+    if previous_card is not None:
+        from fsrs import State
+
+        if previous_card.state == State.Review:
+            revlog_type = 1
+        elif previous_card.state == State.Relearning:
+            revlog_type = 2
 
     conn.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)"
@@ -1233,7 +1265,9 @@ def _build_card_filter_clauses(
             params.extend([due_before, due_before])
 
     if due_after is not None:
-        clauses.append("AND ((c.type IN (1, 3) AND c.due >= ?) OR (c.type = 2 AND c.due >= ?))")
+        clauses.append(
+            "AND ((c.type IN (1, 3) AND c.due >= ?) OR (c.type = 2 AND c.due >= ?) OR c.type = 0)"
+        )
         try:
             dt = datetime.fromisoformat(due_after.replace("Z", "+00:00"))
             params.extend([int(dt.timestamp()), int((dt.timestamp() - crt) / 86400)])

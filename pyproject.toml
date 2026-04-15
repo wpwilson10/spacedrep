@@ -2,7 +2,7 @@
 name = "spacedrep"
 version = "0.3.0"
 requires-python = ">=3.12"
-description = "Agent-first flashcard CLI with FSRS scheduling and .apkg support"
+description = "Spaced repetition for AI agents — CLI and MCP server for Anki flashcards"
 license = "MIT"
 readme = "README.md"
 authors = [{ name = "wpwilson10", email = "wpwilson10@gmail.com" }]

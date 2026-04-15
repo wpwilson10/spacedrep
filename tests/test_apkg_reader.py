@@ -2,7 +2,7 @@
 
 import pytest
 
-from spacedrep.apkg_reader import (
+from spacedrep.anki_render import (
     detect_field_mapping,
     render_cloze,
     resolve_template_fields,

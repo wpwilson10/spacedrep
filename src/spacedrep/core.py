@@ -422,7 +422,7 @@ def _expand_cloze(
     source_note_id: int,
 ) -> list[int]:
     """Expand cloze text into N cards. Returns list of card IDs."""
-    from spacedrep.apkg_reader import render_cloze
+    from spacedrep.anki_render import render_cloze
 
     cloze_nums = sorted({int(m[0]) for m in _CLOZE_PATTERN.findall(text) if int(m[0]) >= 1})
     if not cloze_nums:

@@ -8,7 +8,10 @@ dist/
 .pyright/
 .pytest_cache/
 reviews.db
+collection.anki21
 *.apkg
+pytest-of-*/
+tmp*
 plans/
 designs/
 .claude/

@@ -19,7 +19,7 @@ from spacedrep.models import BulkCardInput, ReviewInput
 
 mcp = FastMCP("spacedrep")
 
-_DB_DEFAULT = "./reviews.db"
+_DB_DEFAULT = "./collection.anki21"
 
 
 def _db_path() -> Path:
@@ -250,7 +250,6 @@ def list_cards(
     suspended: Annotated[
         str, Field(description="Filter by suspended: 'true', 'false', or '' for all")
     ] = "",
-    source: Annotated[str, Field(description="Filter by source: apkg, manual, or generated")] = "",
     due_before: Annotated[
         str, Field(description="Cards due before this datetime (ISO format)")
     ] = "",
@@ -293,7 +292,7 @@ def list_cards(
 ) -> dict[str, Any]:
     """List flashcards with optional filters and pagination. Use to browse or
     search cards. Filter by deck (includes :: sub-decks), tags, state, search text,
-    suspended status, source, date ranges, or leeches. Tag filter matches the tag
+    suspended status, date ranges, or leeches. Tag filter matches the tag
     and all children (e.g. 'foundations' matches 'foundations::rag')."""
     suspended_bool: bool | None = None
     if suspended == "true":
@@ -319,7 +318,6 @@ def list_cards(
             search=_or_none(search),
             leeches_only=leeches_only,
             suspended=suspended_bool,
-            source=_or_none(source),
             due_before=_or_none(due_before),
             due_after=_or_none(due_after),
             created_before=_or_none(created_before),
@@ -479,21 +477,14 @@ def list_decks() -> dict[str, object]:
 @_handle_errors
 def import_deck(
     apkg_path: Annotated[str, Field(description="Absolute path to .apkg file on disk")],
-    question_field: Annotated[str, Field(description="Question field name if non-standard")] = "",
-    answer_field: Annotated[str, Field(description="Answer field name if non-standard")] = "",
-    dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
 ) -> dict[str, Any]:
     """Import an Anki .apkg deck file. Specify the absolute file path on disk.
-    Optionally set question_field and answer_field names if the deck uses
-    non-standard field names. Use dry_run=true to preview without writing."""
+    Merges cards into the current collection."""
     validated = _validate_file_path(apkg_path, must_exist=True)
     return _serialize(
         core.import_deck(
             _db_path(),
             validated,
-            _or_none(question_field),
-            _or_none(answer_field),
-            dry_run=dry_run,
         )
     )
 
@@ -502,44 +493,12 @@ def import_deck(
 @_handle_errors
 def export_deck(
     output_path: Annotated[str, Field(description="Absolute path for the output .apkg file")],
-    deck: Annotated[str, Field(description="Deck name to export (all if empty)")] = "",
-    tags: Annotated[str, Field(description="Space-separated tags filter")] = "",
-    state: Annotated[str, Field(description="Filter: new, learning, review, or relearning")] = "",
-    search: Annotated[str, Field(description="Search text filter")] = "",
-    suspended: Annotated[
-        str, Field(description="Filter by suspended: 'true', 'false', or '' for all")
-    ] = "",
-    source: Annotated[str, Field(description="Filter by source: apkg, manual, or generated")] = "",
-    buried: Annotated[
-        str, Field(description="Filter by buried: 'true', 'false', or '' for all")
-    ] = "",
 ) -> dict[str, Any]:
-    """Export flashcards to an Anki .apkg file. Filter by deck, tags, state,
-    search text, suspended/buried status, or source. Non-existent deck
-    returns 0 exported."""
+    """Save the entire collection as an Anki .apkg file. The .apkg contains
+    all cards, decks, and scheduling state."""
     validated = _validate_file_path(output_path)
-    suspended_bool: bool | None = None
-    if suspended == "true":
-        suspended_bool = True
-    elif suspended == "false":
-        suspended_bool = False
-    buried_bool: bool | None = None
-    if buried == "true":
-        buried_bool = True
-    elif buried == "false":
-        buried_bool = False
-    count = core.export_deck(
-        _db_path(),
-        validated,
-        deck=_or_none(deck),
-        tags=_parse_tags(tags),
-        state=_or_none(state),
-        search=_or_none(search),
-        suspended=suspended_bool,
-        source=_or_none(source),
-        buried=buried_bool,
-    )
-    return {"exported": count, "file": str(validated)}
+    result = core.save_deck(_db_path(), validated)
+    return _serialize(result)
 
 
 # ---------------------------------------------------------------------------

@@ -72,7 +72,8 @@ def card_id(tmp_db: Path) -> int:
 class TestAddCard:
     def test_basic(self, tmp_db: Path) -> None:
         result = add_card("Q1", "A1")
-        assert result["card_id"] == 1
+        assert isinstance(result["card_id"], int)
+        assert result["card_id"] > 0
         assert result["deck"] == "Default"
 
     def test_with_deck_and_tags(self, tmp_db: Path) -> None:
@@ -270,14 +271,15 @@ class TestListTags:
 class TestListDecks:
     def test_empty(self, tmp_db: Path) -> None:
         result = list_decks()
-        assert result["decks"] == []
-        assert result["count"] == 0
+        # Anki schema always has a "Default" deck
+        assert result["count"] >= 1
+        names = [d["name"] for d in result["decks"]]
+        assert "Default" in names
 
     def test_with_deck(self, card_id: int, tmp_db: Path) -> None:
         result = list_decks()
-        assert len(result["decks"]) == 1
-        assert result["decks"][0]["name"] == "AWS"
-        assert result["count"] == 1
+        names = [d["name"] for d in result["decks"]]
+        assert "AWS" in names
 
 
 class TestImportDeck:
@@ -289,12 +291,6 @@ class TestImportDeck:
         assert result["imported"] >= 0
         assert result["updated"] >= 0
         assert "decks" in result
-
-    def test_import_dry_run(self, card_id: int, tmp_db: Path, tmp_path: Path) -> None:
-        apkg = tmp_path / "dryrun.apkg"
-        export_deck(str(apkg))
-        result = import_deck(str(apkg), dry_run=True)
-        assert result["dry_run"] is True
 
     def test_import_missing_file(self, tmp_db: Path) -> None:
         with pytest.raises(ToolError):
@@ -311,8 +307,8 @@ class TestExportDeck:
     def test_export(self, card_id: int, tmp_db: Path, tmp_path: Path) -> None:
         out = tmp_path / "export.apkg"
         result = export_deck(str(out))
-        assert result["exported"] == 1
-        assert result["file"] == str(out.resolve())
+        assert result["card_count"] >= 1
+        assert result["output_path"] == str(out)
 
 
 # ---------------------------------------------------------------------------

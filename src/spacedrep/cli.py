@@ -19,7 +19,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-DB_DEFAULT = typer.Option(Path("./reviews.db"), "--db", help="Path to SQLite database")
+DB_DEFAULT = typer.Option(Path("./collection.anki21"), "--db", help="Path to SQLite database")
 
 
 def output_json(data: BaseModel | dict[str, Any] | list[Any]) -> None:

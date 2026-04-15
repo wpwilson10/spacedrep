@@ -62,49 +62,24 @@ def import_deck(
         raise typer.Exit(code=e.exit_code) from None
 
 
-def _parse_tags(tags: str | None) -> list[str] | None:
-    """Parse space-separated tags string into a list, or None if empty."""
-    if not tags:
-        return None
-    return tags.split()
-
-
 @deck_app.command("export")
 def export_deck(
     path: Path = typer.Argument(..., help="Output .apkg file path"),
-    deck: str | None = typer.Option(None, "--deck", help="Export only this deck"),
-    tags: str | None = typer.Option(None, "--tags", help="Filter by space-separated tags"),
-    state: str | None = typer.Option(None, "--state", help="Filter by state"),
-    search: str | None = typer.Option(None, "--search", "-s", help="Search text filter"),
-    suspended: bool | None = typer.Option(None, "--suspended", help="Filter by suspended status"),
-    source: str | None = typer.Option(None, "--source", help="Filter by source"),
-    buried: bool | None = typer.Option(None, "--buried", help="Filter by buried status"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Output exported count only"),
     db: Path = DB_DEFAULT,
 ) -> None:
-    """Export cards to an .apkg file with optional filters.
+    """Save the entire collection as an Anki .apkg file.
 
     Example:
-        spacedrep deck export ./export.apkg --deck AWS
-        spacedrep deck export ./export.apkg --tags aws --state review
+        spacedrep deck export ./export.apkg
         spacedrep deck export ./export.apkg -q
     """
     try:
-        count = core.export_deck(
-            db,
-            path,
-            deck=deck,
-            tags=_parse_tags(tags),
-            state=state,
-            search=search,
-            suspended=suspended,
-            source=source,
-            buried=buried,
-        )
+        result = core.save_deck(db, path)
         if quiet:
-            output_quiet(count)
+            output_quiet(result.card_count)
         else:
-            output_json({"exported": count, "file": str(path)})
+            output_json(result)
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None

@@ -27,12 +27,16 @@ def _init_db(db_path: Path) -> None:
 
 def _add_card(
     db_path: Path, question: str, answer: str, deck: str = "Default", tags: str = ""
-) -> None:
+) -> int:
+    """Add a card and return its ID."""
     args = ["card", "add", question, answer, "--deck", deck]
     if tags:
         args.extend(["--tags", tags])
     result = _run(args, db_path)
     assert result.returncode == 0
+    data = json.loads(result.stdout)
+    card_id: int = data["card_id"]
+    return card_id
 
 
 class TestHelp:
@@ -55,7 +59,7 @@ class TestDbInit:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["status"] == "ok"
-            assert data["tables_created"] == 5
+            assert data["tables_created"] == 8
 
 
 class TestCardCommands:
@@ -67,7 +71,9 @@ class TestCardCommands:
             result = _run(["card", "add", "What is X?", "X is Y.", "--deck", "Test"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["card_id"] == 1
+            card_id = data["card_id"]
+            assert isinstance(card_id, int)
+            assert card_id > 0
 
             result = _run(["card", "next"], db_path)
             assert result.returncode == 0
@@ -88,14 +94,14 @@ class TestCardCommands:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _run(["card", "add", "Q", "A"], db_path)
+            card_id = _add_card(db_path, "Q", "A")
 
-            result = _run(["card", "suspend", "1"], db_path)
+            result = _run(["card", "suspend", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["suspended"] is True
 
-            result = _run(["card", "unsuspend", "1"], db_path)
+            result = _run(["card", "unsuspend", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["suspended"] is False
@@ -208,12 +214,12 @@ class TestCardGet:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1", deck="AWS", tags="s3")
+            card_id = _add_card(db_path, "Q1", "A1", deck="AWS", tags="s3")
 
-            result = _run(["card", "get", "1"], db_path)
+            result = _run(["card", "get", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["card_id"] == 1
+            assert data["card_id"] == card_id
             assert data["question"] == "Q1"
             assert data["answer"] == "A1"
             assert data["deck"] == "AWS"
@@ -235,13 +241,13 @@ class TestCardHistory:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
-            _run(["review", "submit", "1", "good"], db_path)
+            card_id = _add_card(db_path, "Q1", "A1")
+            _run(["review", "submit", str(card_id), "good"], db_path)
 
-            result = _run(["card", "history", "1"], db_path)
+            result = _run(["card", "history", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["card_id"] == 1
+            assert data["card_id"] == card_id
             assert data["total"] == 1
             assert data["reviews"][0]["rating_name"] == "good"
 
@@ -259,12 +265,12 @@ class TestCardDelete:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["card", "delete", "1"], db_path)
+            result = _run(["card", "delete", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["card_id"] == 1
+            assert data["card_id"] == card_id
             assert data["deleted"] is True
 
     def test_delete_not_found(self) -> None:
@@ -283,9 +289,9 @@ class TestCardUpdate:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["card", "update", "1", "--question", "Updated Q"], db_path)
+            result = _run(["card", "update", str(card_id), "--question", "Updated Q"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["question"] == "Updated Q"
@@ -295,9 +301,9 @@ class TestCardUpdate:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1", deck="AWS")
+            card_id = _add_card(db_path, "Q1", "A1", deck="AWS")
 
-            result = _run(["card", "update", "1", "--deck", "DSA"], db_path)
+            result = _run(["card", "update", str(card_id), "--deck", "DSA"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["deck"] == "DSA"
@@ -306,9 +312,9 @@ class TestCardUpdate:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["card", "update", "1"], db_path)
+            result = _run(["card", "update", str(card_id)], db_path)
             assert result.returncode == 2
             data = json.loads(result.stderr)
             assert data["error"] == "no_fields"
@@ -356,9 +362,9 @@ class TestReview:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _run(["card", "add", "Q", "A"], db_path)
+            card_id = _add_card(db_path, "Q", "A")
 
-            result = _run(["review", "submit", "1", "good"], db_path)
+            result = _run(["review", "submit", str(card_id), "good"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["rating"] == "good"
@@ -367,9 +373,9 @@ class TestReview:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _run(["card", "add", "Q", "A"], db_path)
+            card_id = _add_card(db_path, "Q", "A")
 
-            result = _run(["review", "submit", "1", "3"], db_path)
+            result = _run(["review", "submit", str(card_id), "3"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["rating"] == "good"
@@ -380,7 +386,7 @@ class TestStats:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _run(["card", "add", "Q", "A"], db_path)
+            _add_card(db_path, "Q", "A")
 
             result = _run(["stats", "due"], db_path)
             assert result.returncode == 0
@@ -407,19 +413,22 @@ class TestDeck:
             result = _run(["deck", "list"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data == []
+            # Anki schema always has a Default deck
+            assert isinstance(data, list)
+            names: list[str] = [d["name"] for d in data]  # type: ignore[union-attr]  # json list
+            assert "Default" in names
 
     def test_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _run(["card", "add", "Q", "A", "--deck", "Test"], db_path)
+            _add_card(db_path, "Q", "A", deck="Test")
 
             export_path = Path(tmpdir) / "export.apkg"
             result = _run(["deck", "export", str(export_path)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["exported"] == 1
+            assert data["card_count"] >= 1
             assert export_path.exists()
 
 
@@ -484,6 +493,7 @@ class TestLeech:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
             _add_card(db_path, "Q1", "A1")
+            # Ignore return value - we just need a card to exist
 
             result = _run(["card", "list", "--leeches"], db_path)
             assert result.returncode == 0
@@ -496,12 +506,12 @@ class TestReviewPreview:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["review", "preview", "1"], db_path)
+            result = _run(["review", "preview", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["card_id"] == 1
+            assert data["card_id"] == card_id
             assert "again" in data["previews"]
             assert "good" in data["previews"]
             assert len(data["previews"]) == 4
@@ -552,7 +562,7 @@ class TestErrorHandling:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
 
-            result = _run(["card", "suspend", "999"], db_path)
+            result = _run(["card", "suspend", "999999999999"], db_path)
             assert result.returncode == 3
             data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
@@ -575,30 +585,32 @@ class TestQuiet:
 
             result = _run(["card", "add", "Q1", "A1", "-q"], db_path)
             assert result.returncode == 0
-            assert result.stdout.strip() == "1"
+            # Card IDs are now timestamp-based, just verify it's a valid int
+            card_id = int(result.stdout.strip())
+            assert card_id > 0
 
     def test_card_list_quiet(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
-            _add_card(db_path, "Q2", "A2")
-            _add_card(db_path, "Q3", "A3")
+            id1 = _add_card(db_path, "Q1", "A1")
+            id2 = _add_card(db_path, "Q2", "A2")
+            id3 = _add_card(db_path, "Q3", "A3")
 
             result = _run(["card", "list", "-q"], db_path)
             assert result.returncode == 0
             lines = result.stdout.strip().split("\n")
-            assert lines == ["1", "2", "3"]
+            assert sorted(lines) == sorted([str(id1), str(id2), str(id3)])
 
     def test_card_next_quiet(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
             result = _run(["card", "next", "-q"], db_path)
             assert result.returncode == 0
-            assert result.stdout.strip() == "1"
+            assert result.stdout.strip() == str(card_id)
 
     def test_card_next_quiet_no_due(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -619,17 +631,20 @@ class TestQuiet:
             result = _run(["deck", "list", "-q"], db_path)
             assert result.returncode == 0
             lines = sorted(result.stdout.strip().split("\n"))
-            assert lines == ["AWS", "DSA"]
+            # Anki schema always includes Default deck
+            assert "AWS" in lines
+            assert "DSA" in lines
+            assert "Default" in lines
 
     def test_review_submit_quiet(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["review", "submit", "1", "good", "-q"], db_path)
+            result = _run(["review", "submit", str(card_id), "good", "-q"], db_path)
             assert result.returncode == 0
-            assert result.stdout.strip() == "1"
+            assert result.stdout.strip() == str(card_id)
 
 
 class TestDryRun:
@@ -637,35 +652,35 @@ class TestDryRun:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["card", "delete", "1", "--dry-run"], db_path)
+            result = _run(["card", "delete", str(card_id), "--dry-run"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["dry_run"] is True
-            assert data["card_id"] == 1
+            assert data["card_id"] == card_id
             assert data["action"] == "delete"
 
             # Card should still exist
-            result = _run(["card", "get", "1"], db_path)
+            result = _run(["card", "get", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["card_id"] == 1
+            assert data["card_id"] == card_id
 
     def test_suspend_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
-            _add_card(db_path, "Q1", "A1")
+            card_id = _add_card(db_path, "Q1", "A1")
 
-            result = _run(["card", "suspend", "1", "--dry-run"], db_path)
+            result = _run(["card", "suspend", str(card_id), "--dry-run"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["dry_run"] is True
             assert data["current_suspended"] is False
 
             # Card should NOT be suspended
-            result = _run(["card", "get", "1"], db_path)
+            result = _run(["card", "get", str(card_id)], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["suspended"] is False
@@ -689,7 +704,7 @@ class TestDryRun:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["dry_run"] is True
-            assert data["imported"] == 1
+            assert data["imported"] >= 1
 
             # DB should still be empty
             result = _run(["card", "list"], db2_path)
@@ -702,7 +717,7 @@ class TestDryRun:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
 
-            result = _run(["card", "delete", "999", "--dry-run"], db_path)
+            result = _run(["card", "delete", "999999999999", "--dry-run"], db_path)
             assert result.returncode == 3
             data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"

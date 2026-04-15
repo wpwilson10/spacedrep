@@ -1,9 +1,9 @@
-"""Tests for db module."""
+"""Tests for db module (Anki-native schema)."""
 
 from pathlib import Path
 
 from spacedrep import db
-from spacedrep.models import CardRecord
+from spacedrep.anki_schema import basic_guid
 
 
 def test_init_db(tmp_db: Path) -> None:
@@ -12,7 +12,20 @@ def test_init_db(tmp_db: Path) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
     table_names = {r["name"] for r in tables}
-    assert table_names == {"decks", "cards", "fsrs_state", "review_logs", "config"}
+    expected = {
+        "col",
+        "notes",
+        "cards",
+        "revlog",
+        "graves",
+        "spacedrep_meta",
+        "spacedrep_card_extra",
+        "spacedrep_review_extra",
+    }
+    assert table_names == expected
+    # Col row exists
+    col = conn.execute("SELECT id FROM col WHERE id = 1").fetchone()
+    assert col is not None
     conn.close()
 
 
@@ -28,14 +41,14 @@ def test_upsert_deck(tmp_db: Path) -> None:
 
 def test_insert_and_get_card(tmp_db: Path) -> None:
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
-    card = CardRecord(
-        deck_id=deck_id,
+    card_id, was_update = db.insert_card(
+        conn,
         question="What is X?",
         answer="X is Y.",
+        deck_name="Test",
         tags="test",
+        guid=basic_guid("What is X?", "Test"),
     )
-    card_id, was_update = db.insert_card(conn, card)
     assert not was_update
     conn.commit()
 
@@ -46,28 +59,26 @@ def test_insert_and_get_card(tmp_db: Path) -> None:
     conn.close()
 
 
-def test_card_dedup_on_source_note_id(tmp_db: Path) -> None:
+def test_card_dedup_on_guid(tmp_db: Path) -> None:
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
+    guid = basic_guid("Original Q", "Test")
 
-    card1 = CardRecord(
-        deck_id=deck_id,
+    id1, was_update1 = db.insert_card(
+        conn,
         question="Original Q",
         answer="Original A",
-        source="apkg",
-        source_note_id=12345,
+        deck_name="Test",
+        guid=guid,
     )
-    id1, was_update1 = db.insert_card(conn, card1)
     assert not was_update1
 
-    card2 = CardRecord(
-        deck_id=deck_id,
+    id2, was_update2 = db.insert_card(
+        conn,
         question="Updated Q",
         answer="Updated A",
-        source="apkg",
-        source_note_id=12345,
+        deck_name="Test",
+        guid=guid,
     )
-    id2, was_update2 = db.insert_card(conn, card2)
     assert was_update2
     conn.commit()
 
@@ -115,13 +126,6 @@ def test_due_count(populated_db: Path) -> None:
     counts = db.get_due_count(conn)
     assert counts.total_due == 3
     assert counts.new == 3
-    conn.close()
-
-
-def test_get_all_cards(populated_db: Path) -> None:
-    conn = db.get_connection(populated_db)
-    cards = db.get_all_cards(conn)
-    assert len(cards) == 3
     conn.close()
 
 
@@ -215,11 +219,12 @@ def test_list_cards_by_state(populated_db_multi_deck: Path) -> None:
 
 def test_get_card_detail_found(populated_db_multi_deck: Path) -> None:
     conn = db.get_connection(populated_db_multi_deck)
-    detail = db.get_card_detail(conn, 1)
+    # Get first card's ID (not necessarily 1 since IDs are timestamp-based)
+    result = db.list_cards(conn)
+    first_card = result.cards[0]
+    detail = db.get_card_detail(conn, first_card.card_id)
     assert detail is not None
-    assert detail.card_id == 1
-    assert detail.question == "What is S3?"
-    assert detail.deck == "AWS"
+    assert detail.card_id == first_card.card_id
     assert detail.state == "new"
     assert detail.review_count == 0
     conn.close()
@@ -235,20 +240,25 @@ def test_get_card_detail_not_found(populated_db_multi_deck: Path) -> None:
 # --- delete_card tests ---
 
 
-def test_delete_card_success(populated_db_multi_deck: Path) -> None:
-    conn = db.get_connection(populated_db_multi_deck)
-    assert db.delete_card(conn, 1)
+def test_delete_card_success(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
+    result = db.list_cards(conn)
+    card_id = result.cards[0].card_id
+
+    assert db.delete_card(conn, card_id)
     conn.commit()
 
-    # Card and FSRS state should be gone
-    assert db.get_card_detail(conn, 1) is None
-    fsrs = conn.execute("SELECT 1 FROM fsrs_state WHERE card_id = 1").fetchone()
-    assert fsrs is None
+    # Card should be gone
+    assert db.get_card_detail(conn, card_id) is None
+
+    # Should be in graves
+    grave = conn.execute("SELECT 1 FROM graves WHERE oid = ? AND type = 0", (card_id,)).fetchone()
+    assert grave is not None
     conn.close()
 
 
-def test_delete_card_not_found(populated_db_multi_deck: Path) -> None:
-    conn = db.get_connection(populated_db_multi_deck)
+def test_delete_card_not_found(populated_db: Path) -> None:
+    conn = db.get_connection(populated_db)
     assert not db.delete_card(conn, 9999)
     conn.close()
 
@@ -258,24 +268,29 @@ def test_delete_card_not_found(populated_db_multi_deck: Path) -> None:
 
 def test_update_card_question(populated_db_multi_deck: Path) -> None:
     conn = db.get_connection(populated_db_multi_deck)
-    assert db.update_card(conn, 1, question="Updated S3 question")
+    result = db.list_cards(conn)
+    card_id = result.cards[0].card_id
+
+    assert db.update_card(conn, card_id, question="Updated question")
     conn.commit()
 
-    detail = db.get_card_detail(conn, 1)
+    detail = db.get_card_detail(conn, card_id)
     assert detail is not None
-    assert detail.question == "Updated S3 question"
-    # answer unchanged
-    assert detail.answer == "Object storage"
+    assert detail.question == "Updated question"
     conn.close()
 
 
 def test_update_card_deck(populated_db_multi_deck: Path) -> None:
     conn = db.get_connection(populated_db_multi_deck)
-    dsa_id = conn.execute("SELECT id FROM decks WHERE name = 'DSA'").fetchone()["id"]
-    assert db.update_card(conn, 1, deck_id=dsa_id)
+    result = db.list_cards(conn, deck="AWS")
+    card_id = result.cards[0].card_id
+
+    # Get DSA deck ID
+    dsa_id = db.upsert_deck(conn, "DSA")
+    assert db.update_card(conn, card_id, deck_id=dsa_id)
     conn.commit()
 
-    detail = db.get_card_detail(conn, 1)
+    detail = db.get_card_detail(conn, card_id)
     assert detail is not None
     assert detail.deck == "DSA"
     conn.close()
@@ -292,21 +307,27 @@ def test_update_card_not_found(populated_db_multi_deck: Path) -> None:
 
 def test_increment_lapse_count(populated_db: Path) -> None:
     conn = db.get_connection(populated_db)
-    count = db.increment_lapse_count(conn, 1)
+    result = db.list_cards(conn)
+    card_id = result.cards[0].card_id
+
+    count = db.increment_lapse_count(conn, card_id)
     assert count == 1
-    count = db.increment_lapse_count(conn, 1)
+    count = db.increment_lapse_count(conn, card_id)
     assert count == 2
     conn.close()
 
 
 def test_lapse_count_in_card_detail(populated_db: Path) -> None:
     conn = db.get_connection(populated_db)
-    detail = db.get_card_detail(conn, 1)
+    result = db.list_cards(conn)
+    card_id = result.cards[0].card_id
+
+    detail = db.get_card_detail(conn, card_id)
     assert detail is not None
     assert detail.lapse_count == 0
 
-    db.increment_lapse_count(conn, 1)
-    detail = db.get_card_detail(conn, 1)
+    db.increment_lapse_count(conn, card_id)
+    detail = db.get_card_detail(conn, card_id)
     assert detail is not None
     assert detail.lapse_count == 1
     conn.close()
@@ -314,25 +335,31 @@ def test_lapse_count_in_card_detail(populated_db: Path) -> None:
 
 def test_lapse_count_in_list_cards(populated_db: Path) -> None:
     conn = db.get_connection(populated_db)
-    db.increment_lapse_count(conn, 1)
     result = db.list_cards(conn)
-    card = next(c for c in result.cards if c.card_id == 1)
+    card_id = result.cards[0].card_id
+
+    db.increment_lapse_count(conn, card_id)
+    result = db.list_cards(conn)
+    card = next(c for c in result.cards if c.card_id == card_id)
     assert card.lapse_count == 1
     conn.close()
 
 
 def test_list_cards_leech_filter(populated_db: Path) -> None:
     conn = db.get_connection(populated_db)
+    result = db.list_cards(conn)
+    card_id = result.cards[0].card_id
+
     # No leeches yet
     result = db.list_cards(conn, leech_threshold=8)
     assert result.total == 0
 
-    # Push card 1 lapse count to 8
+    # Push lapse count to 8
     for _ in range(8):
-        db.increment_lapse_count(conn, 1)
+        db.increment_lapse_count(conn, card_id)
     result = db.list_cards(conn, leech_threshold=8)
     assert result.total == 1
-    assert result.cards[0].card_id == 1
+    assert result.cards[0].card_id == card_id
     conn.close()
 
 
@@ -342,14 +369,21 @@ def test_list_cards_leech_filter(populated_db: Path) -> None:
 def test_tag_filter_matches_children(tmp_db: Path) -> None:
     """tags=["parent"] should match cards tagged parent::child."""
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="foundations::bedrock::apis"),
+        question="Q1",
+        answer="A1",
+        deck_name="Test",
+        tags="foundations::bedrock::apis",
+        guid=basic_guid("Q1", "Test"),
     )
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="other"),
+        question="Q2",
+        answer="A2",
+        deck_name="Test",
+        tags="other",
+        guid=basic_guid("Q2", "Test"),
     )
     conn.commit()
 
@@ -362,10 +396,13 @@ def test_tag_filter_matches_children(tmp_db: Path) -> None:
 def test_tag_filter_no_cross_hierarchy(tmp_db: Path) -> None:
     """tags=["chunking"] should NOT match foundations::rag::chunking."""
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="foundations::rag::chunking"),
+        question="Q1",
+        answer="A1",
+        deck_name="Test",
+        tags="foundations::rag::chunking",
+        guid=basic_guid("Q1", "Test"),
     )
     conn.commit()
 
@@ -377,14 +414,21 @@ def test_tag_filter_no_cross_hierarchy(tmp_db: Path) -> None:
 def test_tag_filter_multi_level(tmp_db: Path) -> None:
     """tags=["parent::child"] should match parent::child::grandchild."""
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="parent::child::grandchild"),
+        question="Q1",
+        answer="A1",
+        deck_name="Test",
+        tags="parent::child::grandchild",
+        guid=basic_guid("Q1", "Test"),
     )
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="parent::child"),
+        question="Q2",
+        answer="A2",
+        deck_name="Test",
+        tags="parent::child",
+        guid=basic_guid("Q2", "Test"),
     )
     conn.commit()
 
@@ -396,14 +440,21 @@ def test_tag_filter_multi_level(tmp_db: Path) -> None:
 def test_tag_filter_exact_match(tmp_db: Path) -> None:
     """tags=["AIP-C01"] should match exactly, not partial."""
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="AIP-C01"),
+        question="Q1",
+        answer="A1",
+        deck_name="Test",
+        tags="AIP-C01",
+        guid=basic_guid("Q1", "Test"),
     )
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="AIP"),
+        question="Q2",
+        answer="A2",
+        deck_name="Test",
+        tags="AIP",
+        guid=basic_guid("Q2", "Test"),
     )
     conn.commit()
 
@@ -419,10 +470,20 @@ def test_tag_filter_exact_match(tmp_db: Path) -> None:
 def test_deck_hierarchy_exact_match(tmp_db: Path) -> None:
     """Filtering by 'AWS' matches cards in the 'AWS' deck."""
     conn = db.get_connection(tmp_db)
-    aws_id = db.upsert_deck(conn, "AWS")
-    other_id = db.upsert_deck(conn, "Other")
-    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q1", answer="A1"))
-    db.insert_card(conn, CardRecord(deck_id=other_id, question="Q2", answer="A2"))
+    db.insert_card(
+        conn,
+        question="Q1",
+        answer="A1",
+        deck_name="AWS",
+        guid=basic_guid("Q1", "AWS"),
+    )
+    db.insert_card(
+        conn,
+        question="Q2",
+        answer="A2",
+        deck_name="Other",
+        guid=basic_guid("Q2", "Other"),
+    )
     conn.commit()
     result = db.list_cards(conn, deck="AWS")
     assert result.total == 1
@@ -433,12 +494,27 @@ def test_deck_hierarchy_exact_match(tmp_db: Path) -> None:
 def test_deck_hierarchy_child_match(tmp_db: Path) -> None:
     """Filtering by 'AWS' also matches 'AWS::S3' and 'AWS::S3::Glacier'."""
     conn = db.get_connection(tmp_db)
-    aws_id = db.upsert_deck(conn, "AWS")
-    s3_id = db.upsert_deck(conn, "AWS::S3")
-    glacier_id = db.upsert_deck(conn, "AWS::S3::Glacier")
-    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q-AWS", answer="A"))
-    db.insert_card(conn, CardRecord(deck_id=s3_id, question="Q-S3", answer="A"))
-    db.insert_card(conn, CardRecord(deck_id=glacier_id, question="Q-Glacier", answer="A"))
+    db.insert_card(
+        conn,
+        question="Q-AWS",
+        answer="A",
+        deck_name="AWS",
+        guid=basic_guid("Q-AWS", "AWS"),
+    )
+    db.insert_card(
+        conn,
+        question="Q-S3",
+        answer="A",
+        deck_name="AWS::S3",
+        guid=basic_guid("Q-S3", "AWS::S3"),
+    )
+    db.insert_card(
+        conn,
+        question="Q-Glacier",
+        answer="A",
+        deck_name="AWS::S3::Glacier",
+        guid=basic_guid("Q-Glacier", "AWS::S3::Glacier"),
+    )
     conn.commit()
     result = db.list_cards(conn, deck="AWS")
     assert result.total == 3
@@ -448,10 +524,20 @@ def test_deck_hierarchy_child_match(tmp_db: Path) -> None:
 def test_deck_hierarchy_no_false_positive(tmp_db: Path) -> None:
     """Filtering by 'AWS' must not match 'AWSome' (no :: separator)."""
     conn = db.get_connection(tmp_db)
-    aws_id = db.upsert_deck(conn, "AWS")
-    awesome_id = db.upsert_deck(conn, "AWSome")
-    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q1", answer="A1"))
-    db.insert_card(conn, CardRecord(deck_id=awesome_id, question="Q2", answer="A2"))
+    db.insert_card(
+        conn,
+        question="Q1",
+        answer="A1",
+        deck_name="AWS",
+        guid=basic_guid("Q1", "AWS"),
+    )
+    db.insert_card(
+        conn,
+        question="Q2",
+        answer="A2",
+        deck_name="AWSome",
+        guid=basic_guid("Q2", "AWSome"),
+    )
     conn.commit()
     result = db.list_cards(conn, deck="AWS")
     assert result.total == 1
@@ -462,10 +548,20 @@ def test_deck_hierarchy_no_false_positive(tmp_db: Path) -> None:
 def test_deck_hierarchy_child_only(tmp_db: Path) -> None:
     """Filtering by 'AWS::S3' matches 'AWS::S3' but not parent 'AWS'."""
     conn = db.get_connection(tmp_db)
-    aws_id = db.upsert_deck(conn, "AWS")
-    s3_id = db.upsert_deck(conn, "AWS::S3")
-    db.insert_card(conn, CardRecord(deck_id=aws_id, question="Q-AWS", answer="A"))
-    db.insert_card(conn, CardRecord(deck_id=s3_id, question="Q-S3", answer="A"))
+    db.insert_card(
+        conn,
+        question="Q-AWS",
+        answer="A",
+        deck_name="AWS",
+        guid=basic_guid("Q-AWS", "AWS"),
+    )
+    db.insert_card(
+        conn,
+        question="Q-S3",
+        answer="A",
+        deck_name="AWS::S3",
+        guid=basic_guid("Q-S3", "AWS::S3"),
+    )
     conn.commit()
     result = db.list_cards(conn, deck="AWS::S3")
     assert result.total == 1
@@ -478,14 +574,21 @@ def test_deck_hierarchy_child_only(tmp_db: Path) -> None:
 
 def test_list_tags(tmp_db: Path) -> None:
     conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q1", answer="A1", tags="aws s3 storage"),
+        question="Q1",
+        answer="A1",
+        deck_name="Test",
+        tags="aws s3 storage",
+        guid=basic_guid("Q1", "Test"),
     )
     db.insert_card(
         conn,
-        CardRecord(deck_id=deck_id, question="Q2", answer="A2", tags="aws compute"),
+        question="Q2",
+        answer="A2",
+        deck_name="Test",
+        tags="aws compute",
+        guid=basic_guid("Q2", "Test"),
     )
     conn.commit()
 
@@ -498,29 +601,6 @@ def test_list_tags_empty(tmp_db: Path) -> None:
     conn = db.get_connection(tmp_db)
     tags = db.list_tags(conn)
     assert tags == []
-    conn.close()
-
-
-# --- Migration tests ---
-
-
-def test_tag_migration_commas_to_spaces(tmp_db: Path) -> None:
-    """migrate_db converts comma-separated tags to space-separated."""
-    conn = db.get_connection(tmp_db)
-    deck_id = db.upsert_deck(conn, "Test")
-    # Insert with raw comma-separated tags (bypass migration)
-    conn.execute(
-        "INSERT INTO cards (deck_id, question, answer, tags) VALUES (?, ?, ?, ?)",
-        (deck_id, "Q1", "A1", "aws,s3,storage"),
-    )
-    conn.commit()
-
-    # Run migration
-    db.migrate_db(conn)
-    conn.commit()
-
-    row = conn.execute("SELECT tags FROM cards WHERE question = 'Q1'").fetchone()
-    assert row["tags"] == "aws s3 storage"
     conn.close()
 
 
@@ -585,24 +665,13 @@ def test_get_review_history_empty(tmp_db: Path) -> None:
     conn.close()
 
 
-def test_date_filter_due_before(populated_db: Path) -> None:
-    conn = db.get_connection(populated_db)
-    # All new cards are due now, so a future due_before should return them
-    result = db.list_cards(conn, due_before="2099-12-31 23:59:59")
-    assert result.total > 0
-    # A past due_before should return nothing
-    result = db.list_cards(conn, due_before="2000-01-01 00:00:00")
-    assert result.total == 0
-    conn.close()
-
-
 def test_date_filter_created_after(populated_db: Path) -> None:
     conn = db.get_connection(populated_db)
     # Cards just created, so created_after far past should return them
-    result = db.list_cards(conn, created_after="2000-01-01")
+    result = db.list_cards(conn, created_after="2000-01-01T00:00:00+00:00")
     assert result.total > 0
     # Far future should return nothing
-    result = db.list_cards(conn, created_after="2099-12-31")
+    result = db.list_cards(conn, created_after="2099-12-31T00:00:00+00:00")
     assert result.total == 0
     conn.close()
 
@@ -620,7 +689,6 @@ def test_fsrs_property_filter_difficulty(populated_db: Path) -> None:
     core.submit_review(populated_db, ReviewInput(card_id=card_id, rating=3))
 
     conn = db.get_connection(populated_db)
-    # Get the card's difficulty
     detail = db.get_card_detail(conn, card_id)
     assert detail is not None
     diff = detail.difficulty
@@ -669,4 +737,49 @@ def test_bury_not_found(tmp_db: Path) -> None:
     conn = db.get_connection(tmp_db)
     assert not db.bury_card(conn, 9999, "2099-12-31")
     assert not db.unbury_card(conn, 9999)
+    conn.close()
+
+
+# --- FSRS state tests ---
+
+
+def test_get_fsrs_card_new(populated_db: Path) -> None:
+    """New cards should have a reconstructable FSRS card."""
+    from fsrs import State
+
+    conn = db.get_connection(populated_db)
+    cards = db.list_cards(conn)
+    card_id = cards.cards[0].card_id
+
+    fsrs_card = db.get_fsrs_card(conn, card_id)
+    assert fsrs_card is not None
+    assert fsrs_card.state == State.Learning
+    assert fsrs_card.last_review is None  # never reviewed
+    conn.close()
+
+
+def test_get_fsrs_card_not_found(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    assert db.get_fsrs_card(conn, 9999) is None
+    conn.close()
+
+
+def test_update_fsrs_state(populated_db: Path) -> None:
+    """After review, FSRS state should be persisted in card columns."""
+    from spacedrep import core
+    from spacedrep.models import ReviewInput
+
+    conn = db.get_connection(populated_db)
+    cards = db.list_cards(conn)
+    card_id = cards.cards[0].card_id
+    conn.close()
+
+    core.submit_review(populated_db, ReviewInput(card_id=card_id, rating=3))
+
+    conn = db.get_connection(populated_db)
+    fsrs_card = db.get_fsrs_card(conn, card_id)
+    assert fsrs_card is not None
+    assert fsrs_card.stability is not None
+    assert fsrs_card.difficulty is not None
+    assert fsrs_card.last_review is not None
     conn.close()

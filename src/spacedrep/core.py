@@ -230,7 +230,6 @@ def _open_db(db_path: Path, *, require_exists: bool = True) -> Iterator[sqlite3.
         raise DatabaseNotFoundError(db_path)
     conn = db.get_connection(db_path)
     try:
-        db.migrate_db(conn)
         _ensure_params_loaded(conn)
         yield conn
     finally:
@@ -288,9 +287,9 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
             raise CardNotFoundError(review.card_id)
 
         suspended_row = conn.execute(
-            "SELECT suspended FROM cards WHERE id = ?", (review.card_id,)
+            "SELECT queue FROM cards WHERE id = ?", (review.card_id,)
         ).fetchone()
-        if suspended_row and suspended_row["suspended"]:
+        if suspended_row and suspended_row["queue"] == -1:
             raise CardSuspendedError(review.card_id)
 
         # Leech detection: increment lapse count on "again" for Review/Relearning cards

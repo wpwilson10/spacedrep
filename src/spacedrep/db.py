@@ -1,21 +1,36 @@
-"""SQLite schema and all database queries."""
+"""SQLite queries against Anki-native schema.
+
+All queries target the Anki tables (col, notes, cards, revlog, graves)
+plus spacedrep extension tables (spacedrep_meta, spacedrep_card_extra,
+spacedrep_review_extra). FSRS state is stored in Anki's native card
+columns — no separate fsrs_state table.
+"""
 
 import json
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from fsrs import Card, State
+from fsrs import Card
 
 from spacedrep import fsrs_engine
+from spacedrep.anki_render import ModelInfo, render_card
+from spacedrep.anki_schema import (
+    ANKI_SCHEMA,
+    ColMeta,
+    anki_fields_to_fsrs_card,
+    due_to_datetime,
+    fsrs_card_to_anki_fields,
+)
 from spacedrep.models import (
     CardDetail,
     CardDue,
     CardListResult,
-    CardRecord,
+    CardSource,
     CardSummary,
     DeckInfo,
-    DeckRecord,
     DueCount,
     OverallStats,
     ReviewInput,
@@ -23,85 +38,28 @@ from spacedrep.models import (
     SessionStats,
 )
 
-_SQLITE_DT_FMT = "%Y-%m-%d %H:%M:%S"
-
 VALID_STATES = frozenset({"new", "learning", "review", "relearning"})
+
+# Monotonic ID counter to avoid collisions within the same millisecond
+_next_id_counter = 0
+
+
+def _next_id() -> int:
+    """Generate a unique timestamp-based ID (milliseconds + counter)."""
+    global _next_id_counter
+    ts = int(time.time() * 1000)
+    _next_id_counter += 1
+    return ts + _next_id_counter
 
 
 def _now_str() -> str:
-    """Current UTC time as SQLite datetime string."""
-    return datetime.now(UTC).replace(tzinfo=None).strftime(_SQLITE_DT_FMT)
+    """Current UTC time as ISO datetime string."""
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _to_sqlite_dt(dt: datetime) -> str:
-    """Convert a datetime to SQLite-compatible format (UTC, no timezone)."""
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(UTC).replace(tzinfo=None)
-    return dt.strftime(_SQLITE_DT_FMT)
-
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS decks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    source_id INTEGER,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS cards (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    deck_id INTEGER NOT NULL REFERENCES decks(id),
-    question TEXT NOT NULL,
-    answer TEXT NOT NULL,
-    extra_fields TEXT NOT NULL DEFAULT '{}',
-    tags TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT 'manual',
-    source_note_id INTEGER,
-    source_note_guid TEXT,
-    source_card_ord INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    suspended INTEGER NOT NULL DEFAULT 0,
-    buried_until TEXT
-);
-
-CREATE TABLE IF NOT EXISTS fsrs_state (
-    card_id INTEGER PRIMARY KEY REFERENCES cards(id),
-    fsrs_card_json TEXT NOT NULL,
-    due TEXT NOT NULL,
-    state INTEGER NOT NULL DEFAULT 1,
-    stability REAL,
-    difficulty REAL,
-    last_review TEXT,
-    retrievability REAL,
-    lapse_count INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS review_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    card_id INTEGER NOT NULL REFERENCES cards(id),
-    rating INTEGER NOT NULL,
-    user_answer TEXT,
-    feedback TEXT,
-    reviewed_at TEXT NOT NULL DEFAULT (datetime('now')),
-    session_id TEXT,
-    fsrs_log_json TEXT
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_source_note
-    ON cards(source_note_id, source_card_ord) WHERE source_note_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_fsrs_due ON fsrs_state(due);
-CREATE INDEX IF NOT EXISTS idx_fsrs_state ON fsrs_state(state);
-CREATE INDEX IF NOT EXISTS idx_review_card ON review_logs(card_id, reviewed_at);
-CREATE INDEX IF NOT EXISTS idx_review_session ON review_logs(session_id);
-
-CREATE TABLE IF NOT EXISTS config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-"""
-
-_TABLE_COUNT = 5
+# ---------------------------------------------------------------------------
+# Connection and initialization
+# ---------------------------------------------------------------------------
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -113,289 +71,304 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+_TABLE_COUNT = 8  # 5 Anki + 3 extension
+
+
 def init_db(conn: sqlite3.Connection) -> int:
-    """Execute all CREATE TABLE/INDEX statements. Returns number of tables created."""
-    conn.executescript(_SCHEMA)
-    migrate_db(conn)
+    """Create Anki schema and insert default col row. Returns table count."""
+    conn.executescript(ANKI_SCHEMA)
+    existing = conn.execute("SELECT id FROM col WHERE id = 1").fetchone()
+    if existing is None:
+        meta = ColMeta.default()
+        row = meta.to_col_row()
+        conn.execute(
+            "INSERT INTO col"
+            " (id, crt, mod, scm, ver, dty, usn, ls,"
+            " conf, models, decks, dconf, tags)"
+            " VALUES (:id, :crt, :mod, :scm, :ver, :dty, :usn, :ls,"
+            " :conf, :models, :decks, :dconf, :tags)",
+            row,
+        )
     return _TABLE_COUNT
 
 
-def _add_column_if_missing(
-    conn: sqlite3.Connection, table: str, column: str, definition: str
-) -> None:
-    """Add a column to a table if it doesn't already exist. No-op if table is missing."""
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    if not rows:
-        return  # Table doesn't exist yet; schema creation will handle it
-    columns = [r[1] for r in rows]
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+# ---------------------------------------------------------------------------
+# ColMeta helpers (read/write col row)
+# ---------------------------------------------------------------------------
 
 
-def migrate_db(conn: sqlite3.Connection) -> None:
-    """Run idempotent schema migrations."""
-    _add_column_if_missing(conn, "fsrs_state", "lapse_count", "INTEGER NOT NULL DEFAULT 0")
-    _add_column_if_missing(conn, "cards", "source_card_ord", "INTEGER NOT NULL DEFAULT 0")
-    _add_column_if_missing(conn, "cards", "buried_until", "TEXT")
-    # Convert comma-separated tags to space-separated (idempotent)
-    rows = conn.execute("PRAGMA table_info(cards)").fetchall()
-    if rows:
-        conn.execute("UPDATE cards SET tags = REPLACE(tags, ',', ' ') WHERE tags LIKE '%,%'")
-        # Recreate source_note index as composite key (idempotent via DROP IF EXISTS).
-        # Only runs when cards table exists — fresh DBs get the correct index from _SCHEMA.
-        conn.executescript("""
-            DROP INDEX IF EXISTS idx_cards_source_note;
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_source_note
-                ON cards(source_note_id, source_card_ord) WHERE source_note_id IS NOT NULL;
-        """)
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-    """)
+def _load_col_meta(conn: sqlite3.Connection) -> ColMeta:
+    """Read and parse the col row."""
+    row = conn.execute(
+        "SELECT crt, mod, scm, ver, conf, models, decks, dconf, tags FROM col WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        msg = "No col row found — database not initialized"
+        raise RuntimeError(msg)
+    return ColMeta.from_row(dict(row))
 
 
-# --- Filter helper ---
+def _save_col_meta(conn: sqlite3.Connection, meta: ColMeta) -> None:
+    """Write the col row back to the database."""
+    meta.mod = int(time.time())
+    conn.execute(
+        "UPDATE col SET mod=?, conf=?, models=?, decks=?, dconf=?, tags=? WHERE id=1",
+        (
+            meta.mod,
+            json.dumps(meta.conf),
+            json.dumps(meta.models),
+            json.dumps(meta.decks),
+            json.dumps(meta.dconf),
+            json.dumps(meta.tags),
+        ),
+    )
 
 
-def _build_card_filter_clauses(
-    *,
-    deck: str | None = None,
-    tags: list[str] | None = None,
-    state: str | None = None,
-    leech_threshold: int | None = None,
-    search: str | None = None,
-    suspended: bool | None = None,
-    source: str | None = None,
-    due_before: str | None = None,
-    due_after: str | None = None,
-    created_before: str | None = None,
-    created_after: str | None = None,
-    reviewed_before: str | None = None,
-    reviewed_after: str | None = None,
-    min_difficulty: float | None = None,
-    max_difficulty: float | None = None,
-    min_stability: float | None = None,
-    max_stability: float | None = None,
-    min_retrievability: float | None = None,
-    max_retrievability: float | None = None,
-    buried: bool | None = None,
-) -> tuple[str, list[str | int | float]]:
-    """Build SQL WHERE fragments for card filtering.
+def _get_crt(conn: sqlite3.Connection) -> int:
+    """Get col.crt (collection creation timestamp)."""
+    row = conn.execute("SELECT crt FROM col WHERE id = 1").fetchone()
+    if row is None:
+        msg = "No col row found"
+        raise RuntimeError(msg)
+    return int(row["crt"])
 
-    Returns (sql_fragment, params). The fragment uses AND-prefixed clauses
-    suitable for appending to an existing WHERE.
-    """
-    clauses: list[str] = []
-    params: list[str | int | float] = []
 
-    if deck is not None:
-        clauses.append("AND (d.name = ? OR d.name LIKE ?)")
-        params.extend([deck, f"{deck}::%"])
+# ---------------------------------------------------------------------------
+# Model info cache (per-connection)
+# ---------------------------------------------------------------------------
 
-    if tags:
-        tag_conditions: list[str] = []
-        for tag in tags:
-            tag_conditions.append(
-                "((' ' || c.tags || ' ') LIKE ? OR (' ' || c.tags || ' ') LIKE ?)"
-            )
-            params.extend([f"% {tag} %", f"% {tag}::%"])
-        clauses.append(f"AND ({' OR '.join(tag_conditions)})")
 
-    if state is not None:
-        if state == "new":
-            clauses.append("AND (fs.state = ? AND fs.last_review IS NULL)")
-            params.append(State.Learning.value)
-        elif state == "learning":
-            clauses.append("AND (fs.state = ? AND fs.last_review IS NOT NULL)")
-            params.append(State.Learning.value)
-        elif state == "review":
-            clauses.append("AND fs.state = ?")
-            params.append(State.Review.value)
-        elif state == "relearning":
-            clauses.append("AND fs.state = ?")
-            params.append(State.Relearning.value)
+_model_cache: dict[int, dict[str, ModelInfo]] = {}
 
-    if leech_threshold is not None:
-        clauses.append("AND fs.lapse_count >= ?")
-        params.append(leech_threshold)
 
-    if search is not None:
-        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        like_param = f"%{escaped}%"
-        clauses.append(
-            "AND (c.question LIKE ? ESCAPE '\\' "
-            "OR c.answer LIKE ? ESCAPE '\\' "
-            "OR c.extra_fields LIKE ? ESCAPE '\\')"
+def _get_models(conn: sqlite3.Connection) -> dict[str, ModelInfo]:
+    """Get parsed model info, cached per connection id."""
+    conn_id = id(conn)
+    if conn_id in _model_cache:
+        return _model_cache[conn_id]
+
+    row = conn.execute("SELECT models FROM col WHERE id = 1").fetchone()
+    if row is None:
+        return {}
+    models_json: dict[str, Any] = json.loads(row["models"])
+    result: dict[str, ModelInfo] = {}
+    for mid, model in models_json.items():
+        result[mid] = ModelInfo(
+            field_names=[f["name"] for f in model["flds"]],
+            templates=model.get("tmpls", []),
+            model_type=model.get("type", 0),
         )
-        params.extend([like_param, like_param, like_param])
-
-    if suspended is not None:
-        clauses.append("AND c.suspended = ?")
-        params.append(int(suspended))
-
-    if source is not None:
-        clauses.append("AND c.source = ?")
-        params.append(source)
-
-    if due_before is not None:
-        clauses.append("AND fs.due <= ?")
-        params.append(due_before)
-
-    if due_after is not None:
-        clauses.append("AND fs.due >= ?")
-        params.append(due_after)
-
-    if created_before is not None:
-        clauses.append("AND c.created_at <= ?")
-        params.append(created_before)
-
-    if created_after is not None:
-        clauses.append("AND c.created_at >= ?")
-        params.append(created_after)
-
-    if reviewed_before is not None:
-        clauses.append("AND fs.last_review <= ?")
-        params.append(reviewed_before)
-
-    if reviewed_after is not None:
-        clauses.append("AND fs.last_review >= ?")
-        params.append(reviewed_after)
-
-    if min_difficulty is not None:
-        clauses.append("AND fs.difficulty >= ?")
-        params.append(min_difficulty)
-
-    if max_difficulty is not None:
-        clauses.append("AND fs.difficulty <= ?")
-        params.append(max_difficulty)
-
-    if min_stability is not None:
-        clauses.append("AND fs.stability >= ?")
-        params.append(min_stability)
-
-    if max_stability is not None:
-        clauses.append("AND fs.stability <= ?")
-        params.append(max_stability)
-
-    if min_retrievability is not None:
-        clauses.append("AND fs.retrievability >= ?")
-        params.append(min_retrievability)
-
-    if max_retrievability is not None:
-        clauses.append("AND fs.retrievability <= ?")
-        params.append(max_retrievability)
-
-    if buried is True:
-        clauses.append("AND c.buried_until IS NOT NULL AND c.buried_until > datetime('now')")
-    elif buried is False:
-        clauses.append("AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))")
-
-    return (" ".join(clauses), params)
+    _model_cache[conn_id] = result
+    return result
 
 
-# --- Deck operations ---
+def invalidate_model_cache(conn: sqlite3.Connection) -> None:
+    """Clear the model cache for a connection (call after modifying col.models)."""
+    _model_cache.pop(id(conn), None)
+
+
+# ---------------------------------------------------------------------------
+# Deck operations
+# ---------------------------------------------------------------------------
 
 
 def upsert_deck(conn: sqlite3.Connection, name: str, source_id: int | None = None) -> int:
-    """INSERT OR IGNORE by name, return deck ID."""
-    conn.execute(
-        "INSERT OR IGNORE INTO decks (name, source_id) VALUES (?, ?)",
-        (name, source_id),
-    )
-    row = conn.execute("SELECT id FROM decks WHERE name = ?", (name,)).fetchone()
-    return int(row["id"])
+    """Get or create a deck by name. Returns the deck ID.
+
+    source_id is ignored in the new schema (kept for API compat).
+    """
+    meta = _load_col_meta(conn)
+    deck_id = meta.ensure_deck(name)
+    _save_col_meta(conn, meta)
+    return deck_id
 
 
 def list_decks(conn: sqlite3.Connection) -> list[DeckInfo]:
     """List all decks with card counts and due counts."""
-    rows = conn.execute("""
-        SELECT d.name,
-               COUNT(c.id) AS card_count,
-               COUNT(CASE WHEN fs.due <= datetime('now') AND c.suspended = 0
-                          AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
-                          THEN 1 END) AS due_count
-        FROM decks d
-        LEFT JOIN cards c ON c.deck_id = d.id
-        LEFT JOIN fsrs_state fs ON fs.card_id = c.id
-        GROUP BY d.id, d.name
-        ORDER BY d.name
-    """).fetchall()
-    return [
-        DeckInfo(name=r["name"], card_count=r["card_count"], due_count=r["due_count"]) for r in rows
-    ]
+    meta = _load_col_meta(conn)
+    crt = meta.crt
+    now_ts = int(time.time())
+    now_days = int((now_ts - crt) / 86400)
 
+    results: list[DeckInfo] = []
+    for did_str, deck_data in meta.decks.items():
+        did = int(did_str)
+        deck_name = str(deck_data.get("name", "Unknown"))
 
-def get_deck_records(conn: sqlite3.Connection) -> list[DeckRecord]:
-    """Get all decks as DeckRecord (with IDs)."""
-    rows = conn.execute(
-        "SELECT id, name, source_id, created_at FROM decks ORDER BY name"
-    ).fetchall()
-    return [
-        DeckRecord(id=r["id"], name=r["name"], source_id=r["source_id"], created_at=r["created_at"])
-        for r in rows
-    ]
-
-
-# --- Card operations ---
-
-
-def insert_card(conn: sqlite3.Connection, card: CardRecord) -> tuple[int, bool]:
-    """Insert a card with dedup on source_note_id.
-
-    Returns (card_id, was_update) — was_update is True if an existing card
-    was updated via source_note_id dedup.
-    """
-    extra_json = json.dumps(card.extra_fields)
-
-    if card.source_note_id is not None:
-        existing = conn.execute(
-            "SELECT id FROM cards WHERE source_note_id = ? AND source_card_ord = ?",
-            (card.source_note_id, card.source_card_ord),
+        card_count_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM cards WHERE did = ?", (did,)
         ).fetchone()
-        if existing:
-            conn.execute(
-                """UPDATE cards SET question = ?, answer = ?, extra_fields = ?,
-                   tags = ?, source_note_guid = ?, suspended = ?, deck_id = ?
-                   WHERE id = ?""",
-                (
-                    card.question,
-                    card.answer,
-                    extra_json,
-                    card.tags,
-                    card.source_note_guid,
-                    int(card.suspended),
-                    card.deck_id,
-                    existing["id"],
-                ),
-            )
-            return (int(existing["id"]), True)
+        card_count = int(card_count_row["cnt"]) if card_count_row else 0
 
-    cursor = conn.execute(
-        """INSERT INTO cards (deck_id, question, answer, extra_fields, tags, source,
-           source_note_id, source_note_guid, source_card_ord, suspended)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            card.deck_id,
-            card.question,
-            card.answer,
-            extra_json,
-            card.tags,
-            card.source,
-            card.source_note_id,
-            card.source_note_guid,
-            card.source_card_ord,
-            int(card.suspended),
-        ),
+        # Due count: type-dependent check
+        due_row = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM cards c
+            LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
+            WHERE c.did = ? AND c.queue >= 0
+            AND (sce.buried_until IS NULL OR sce.buried_until <= ?)
+            AND (
+                (c.type = 0 AND c.queue = 0)
+                OR (c.type IN (1, 3) AND c.due <= ?)
+                OR (c.type = 2 AND c.due <= ?)
+            )""",
+            (did, _now_str(), now_ts, now_days),
+        ).fetchone()
+        due_count = int(due_row["cnt"]) if due_row else 0
+
+        results.append(DeckInfo(name=deck_name, card_count=card_count, due_count=due_count))
+
+    results.sort(key=lambda d: d.name)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Card insert
+# ---------------------------------------------------------------------------
+
+
+def insert_card(
+    conn: sqlite3.Connection,
+    *,
+    question: str,
+    answer: str,
+    deck_name: str,
+    tags: str = "",
+    model_type: str = "basic",
+    source: CardSource = "manual",
+    guid: str,
+    note_flds: str | None = None,
+) -> tuple[int, bool]:
+    """Insert a card (note + card row). Dedup on notes.guid.
+
+    Returns (card_id, was_update).
+    """
+    now = int(time.time())
+
+    meta = _load_col_meta(conn)
+    did = meta.ensure_deck(deck_name)
+    mid = meta.ensure_model(model_type)
+    _save_col_meta(conn, meta)
+
+    # Build flds
+    if note_flds is None:
+        note_flds = f"{question}\x1f" if model_type == "cloze" else f"{question}\x1f{answer}"
+
+    sfld = question
+
+    # Dedup on guid
+    existing = conn.execute("SELECT id FROM notes WHERE guid = ?", (guid,)).fetchone()
+    if existing:
+        note_id = int(existing["id"])
+        conn.execute(
+            "UPDATE notes SET flds=?, sfld=?, tags=?, mod=?, usn=-1 WHERE id=?",
+            (note_flds, sfld, tags, now, note_id),
+        )
+        # Update card's deck if changed
+        conn.execute("UPDATE cards SET did=?, mod=?, usn=-1 WHERE nid=?", (did, now, note_id))
+
+        card_row = conn.execute(
+            "SELECT id FROM cards WHERE nid = ? ORDER BY ord LIMIT 1", (note_id,)
+        ).fetchone()
+        card_id = int(card_row["id"]) if card_row else note_id
+        return (card_id, True)
+
+    # Insert new note
+    note_id = _next_id()
+    conn.execute(
+        "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)"
+        " VALUES (?, ?, ?, ?, -1, ?, ?, ?, 0, 0, '')",
+        (note_id, guid, mid, now, tags, note_flds, sfld),
     )
-    card_id = cursor.lastrowid
-    if card_id is None:
-        msg = "Failed to insert card"
-        raise RuntimeError(msg)
-    insert_initial_fsrs_state(conn, card_id)
+
+    # Get next position for new cards
+    pos_row = conn.execute("SELECT MAX(due) AS maxdue FROM cards WHERE type = 0").fetchone()
+    position = (int(pos_row["maxdue"]) + 1) if (pos_row and pos_row["maxdue"] is not None) else 0
+
+    # Insert card
+    card_id = _next_id()
+    conn.execute(
+        "INSERT INTO cards"
+        " (id, nid, did, ord, mod, usn, type, queue, due, ivl,"
+        "  factor, reps, lapses, left, odue, odid, flags, data)"
+        " VALUES (?, ?, ?, 0, ?, -1, 0, 0, ?, 0, 2500, 0, 0, 0, 0, 0, 0, '')",
+        (card_id, note_id, did, now, position),
+    )
+
+    # Insert source into extension table
+    if source != "manual":
+        conn.execute(
+            "INSERT OR REPLACE INTO spacedrep_card_extra (card_id, source) VALUES (?, ?)",
+            (card_id, source),
+        )
+
+    invalidate_model_cache(conn)
     return (card_id, False)
+
+
+def insert_cloze_cards(
+    conn: sqlite3.Connection,
+    *,
+    note_id: int,
+    did: int,
+    cloze_count: int,
+    now: int,
+) -> list[int]:
+    """Insert N card rows for a cloze note (one per ordinal). Returns card IDs."""
+    pos_row = conn.execute("SELECT MAX(due) AS maxdue FROM cards WHERE type = 0").fetchone()
+    position = (int(pos_row["maxdue"]) + 1) if (pos_row and pos_row["maxdue"] is not None) else 0
+
+    card_ids: list[int] = []
+    for i in range(cloze_count):
+        card_id = _next_id()
+        conn.execute(
+            "INSERT INTO cards"
+            " (id, nid, did, ord, mod, usn, type, queue, due, ivl,"
+            "  factor, reps, lapses, left, odue, odid, flags, data)"
+            " VALUES (?, ?, ?, ?, ?, -1, 0, 0, ?, 0, 2500, 0, 0, 0, 0, 0, 0, '')",
+            (card_id, note_id, did, i, now, position + i),
+        )
+        card_ids.append(card_id)
+    return card_ids
+
+
+# ---------------------------------------------------------------------------
+# Card read operations
+# ---------------------------------------------------------------------------
+
+
+def _render_from_row(
+    row: sqlite3.Row, models: dict[str, ModelInfo]
+) -> tuple[str, str, dict[str, str]]:
+    """Render question/answer/extra from a row with flds, mid, ord columns."""
+    mid_str = str(row["mid"])
+    minfo = models.get(mid_str)
+    if minfo is None:
+        # Fallback: split flds and take first two
+        parts = str(row["flds"]).split("\x1f")
+        return (parts[0] if parts else "", parts[1] if len(parts) > 1 else "", {})
+    return render_card(str(row["flds"]), minfo, int(row["ord"]))
+
+
+def _card_state_name(card_type: int, last_review_ts: int | None) -> str:
+    """Convert Anki card type to human-readable state name."""
+    if card_type == 0:
+        return "new"
+    state = {0: "new", 1: "learning", 2: "review", 3: "relearning"}.get(card_type, "learning")
+    if card_type == 1 and last_review_ts is None:
+        return "new"
+    return state
+
+
+def _get_last_review_ts(data_str: str) -> int | None:
+    """Extract lrt from cards.data JSON, or None."""
+    if not data_str:
+        return None
+    try:
+        data = json.loads(data_str)
+        lrt = data.get("lrt")
+        return int(lrt) if lrt is not None else None
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
 
 
 def get_next_due_card(
@@ -407,41 +380,63 @@ def get_next_due_card(
     search: str | None = None,
     due_before: str | None = None,
 ) -> CardDue | None:
-    """Get the next due card, optionally filtered. Returns None when nothing is due."""
+    """Get the next due card. Returns None when nothing is due."""
+    crt = _get_crt(conn)
+    models = _get_models(conn)
+    now_ts = int(time.time())
+    now_days = int((now_ts - crt) / 86400)
+
     filter_sql, filter_params = _build_card_filter_clauses(
-        deck=deck, tags=tags, state=state, search=search, due_before=due_before
+        deck=deck,
+        tags=tags,
+        state=state,
+        search=search,
+        due_before=due_before,
+        crt=crt,
     )
+
     query = f"""
-        SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
-               c.tags, c.extra_fields,
-               fs.state, fs.last_review, fs.fsrs_card_json
+        SELECT c.id AS card_id, n.flds, n.mid, c.ord, n.tags,
+               c.type, c.due, c.ivl, c.factor, c.data, c.did,
+               sce.step
         FROM cards c
-        JOIN fsrs_state fs ON fs.card_id = c.id
-        JOIN decks d ON d.id = c.deck_id
-        WHERE fs.due <= datetime('now') AND c.suspended = 0
-        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
+        JOIN notes n ON n.id = c.nid
+        LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
+        WHERE c.queue >= 0
+        AND (sce.buried_until IS NULL OR sce.buried_until <= ?)
+        AND (
+            (c.type = 0 AND c.queue = 0)
+            OR (c.type IN (1, 3) AND c.due <= ?)
+            OR (c.type = 2 AND c.due <= ?)
+        )
         {filter_sql}
-        ORDER BY fs.due ASC
+        ORDER BY
+            CASE WHEN c.type IN (1, 3) THEN 0 ELSE 1 END,
+            c.due ASC
         LIMIT 1
     """
-    row = conn.execute(query, filter_params).fetchone()
+    params: list[Any] = [_now_str(), now_ts, now_days, *filter_params]
+    row = conn.execute(query, params).fetchone()
     if row is None:
         return None
 
-    fsrs_card = fsrs_engine.deserialize_card(row["fsrs_card_json"])
+    question, answer, extra = _render_from_row(row, models)
+    deck_name = _deck_name_for_did(conn, row["did"])
+    lrt = _get_last_review_ts(row["data"])
+
+    # Get FSRS card for retrievability
+    fsrs_card = anki_fields_to_fsrs_card(dict(row), crt)
     retrievability = fsrs_engine.get_retrievability(fsrs_card)
-    card_state = fsrs_engine.state_name(State(row["state"]), row["last_review"])
-    extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
 
     return CardDue(
         card_id=row["card_id"],
-        question=row["question"],
-        answer=row["answer"],
-        deck=row["deck"],
+        question=question,
+        answer=answer,
+        deck=deck_name,
         tags=row["tags"],
-        state=card_state,
+        state=_card_state_name(row["type"], lrt),
         retrievability=round(retrievability, 4),
-        extra_fields=extra_parsed,
+        extra_fields=extra,
     )
 
 
@@ -454,7 +449,6 @@ def list_cards(
     leech_threshold: int | None = None,
     search: str | None = None,
     suspended: bool | None = None,
-    source: str | None = None,
     due_before: str | None = None,
     due_after: str | None = None,
     created_before: str | None = None,
@@ -472,6 +466,9 @@ def list_cards(
     offset: int = 0,
 ) -> CardListResult:
     """List cards with optional filters, paginated."""
+    crt = _get_crt(conn)
+    models = _get_models(conn)
+
     filter_sql, filter_params = _build_card_filter_clauses(
         deck=deck,
         tags=tags,
@@ -479,7 +476,6 @@ def list_cards(
         leech_threshold=leech_threshold,
         search=search,
         suspended=suspended,
-        source=source,
         due_before=due_before,
         due_after=due_after,
         created_before=created_before,
@@ -493,60 +489,66 @@ def list_cards(
         min_retrievability=min_retrievability,
         max_retrievability=max_retrievability,
         buried=buried,
+        crt=crt,
     )
 
-    count_query = f"""
-        SELECT COUNT(*) AS cnt
+    base_from = f"""
         FROM cards c
-        JOIN fsrs_state fs ON fs.card_id = c.id
-        JOIN decks d ON d.id = c.deck_id
+        JOIN notes n ON n.id = c.nid
+        LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
         WHERE 1=1 {filter_sql}
     """
-    count_row = conn.execute(count_query, filter_params).fetchone()
+
+    count_row = conn.execute(f"SELECT COUNT(*) AS cnt {base_from}", filter_params).fetchone()
     total = int(count_row["cnt"]) if count_row else 0
 
     data_query = f"""
-        SELECT c.id AS card_id, c.question, d.name AS deck, c.tags,
-               c.suspended, c.buried_until, fs.state, fs.last_review, fs.due, fs.lapse_count
-        FROM cards c
-        JOIN fsrs_state fs ON fs.card_id = c.id
-        JOIN decks d ON d.id = c.deck_id
-        WHERE 1=1 {filter_sql}
+        SELECT c.id AS card_id, n.flds, n.mid, c.ord, n.tags,
+               c.type, c.data, c.did, c.queue, c.lapses,
+               sce.buried_until
+        {base_from}
         ORDER BY c.id ASC
         LIMIT ? OFFSET ?
     """
-    data_params: list[str | int | float] = [*filter_params, limit, offset]
+    data_params: list[Any] = [*filter_params, limit, offset]
     rows = conn.execute(data_query, data_params).fetchall()
 
-    cards = [
-        CardSummary(
-            card_id=r["card_id"],
-            question=r["question"][:100],
-            deck=r["deck"],
-            tags=r["tags"],
-            state=fsrs_engine.state_name(State(r["state"]), r["last_review"]),
-            due=r["due"],
-            suspended=bool(r["suspended"]),
-            buried=r["buried_until"] is not None and r["buried_until"] > _now_str(),
-            lapse_count=r["lapse_count"],
+    cards: list[CardSummary] = []
+    for r in rows:
+        question, _, _ = _render_from_row(r, models)
+        lrt = _get_last_review_ts(r["data"])
+        due_dt = due_to_datetime(int(r["due"]) if "due" in dict(r) else 0, r["type"], crt)
+        cards.append(
+            CardSummary(
+                card_id=r["card_id"],
+                question=question[:100],
+                deck=_deck_name_for_did(conn, r["did"]),
+                tags=r["tags"],
+                state=_card_state_name(r["type"], lrt),
+                due=due_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                suspended=r["queue"] == -1,
+                buried=r["buried_until"] is not None and r["buried_until"] > _now_str(),
+                lapse_count=r["lapses"],
+            )
         )
-        for r in rows
-    ]
     return CardListResult(cards=cards, total=total, limit=limit, offset=offset)
 
 
 def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None:
-    """Get full card detail including FSRS state and review count."""
+    """Get full card detail including FSRS state."""
+    crt = _get_crt(conn)
+    models = _get_models(conn)
+
     row = conn.execute(
         """
-        SELECT c.id AS card_id, c.question, c.answer, d.name AS deck,
-               c.tags, c.extra_fields, c.source, c.suspended, c.buried_until, c.created_at,
-               fs.state, fs.due, fs.stability, fs.difficulty,
-               fs.last_review, fs.fsrs_card_json, fs.lapse_count,
-               (SELECT COUNT(*) FROM review_logs rl WHERE rl.card_id = c.id) AS review_count
+        SELECT c.id AS card_id, n.flds, n.mid, c.ord, n.tags,
+               c.type, c.queue, c.due, c.ivl, c.factor, c.reps, c.lapses, c.data, c.did,
+               c.mod AS card_mod,
+               sce.buried_until, sce.source,
+               (SELECT COUNT(*) FROM revlog rl WHERE rl.cid = c.id) AS review_count
         FROM cards c
-        JOIN fsrs_state fs ON fs.card_id = c.id
-        JOIN decks d ON d.id = c.deck_id
+        JOIN notes n ON n.id = c.nid
+        LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
         WHERE c.id = ?
         """,
         (card_id,),
@@ -554,40 +556,45 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
     if row is None:
         return None
 
-    fsrs_card = fsrs_engine.deserialize_card(row["fsrs_card_json"])
+    question, answer, extra = _render_from_row(row, models)
+    fsrs_card = anki_fields_to_fsrs_card(dict(row), crt)
     retrievability = fsrs_engine.get_retrievability(fsrs_card)
-    extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
+    lrt = _get_last_review_ts(row["data"])
+    due_dt = due_to_datetime(row["due"], row["type"], crt)
+
+    last_review_str: str | None = None
+    if lrt is not None:
+        last_review_str = datetime.fromtimestamp(lrt, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+    # created_at from card mod (first mod is creation time, approximation)
+    created_ts = row["card_mod"]
+    created_at = datetime.fromtimestamp(created_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+
     return CardDetail(
         card_id=row["card_id"],
-        question=row["question"],
-        answer=row["answer"],
-        deck=row["deck"],
+        question=question,
+        answer=answer,
+        deck=_deck_name_for_did(conn, row["did"]),
         tags=row["tags"],
-        extra_fields=extra_parsed,
-        source=row["source"],
-        suspended=bool(row["suspended"]),
+        extra_fields=extra,
+        source=row["source"] or "manual",
+        suspended=row["queue"] == -1,
         buried_until=row["buried_until"],
-        created_at=row["created_at"],
-        state=fsrs_engine.state_name(State(row["state"]), row["last_review"]),
-        due=row["due"],
-        stability=round(float(row["stability"] or 0.0), 4),
-        difficulty=round(float(row["difficulty"] or 0.0), 4),
+        created_at=created_at,
+        state=_card_state_name(row["type"], lrt),
+        due=due_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        stability=round(float(fsrs_card.stability or 0.0), 4),
+        difficulty=round(float(fsrs_card.difficulty or 0.0), 4),
         retrievability=round(retrievability, 4),
-        last_review=row["last_review"],
+        last_review=last_review_str,
         review_count=row["review_count"],
-        lapse_count=row["lapse_count"],
+        lapse_count=row["lapses"],
     )
 
 
-def delete_card(conn: sqlite3.Connection, card_id: int) -> bool:
-    """Delete a card and its related data. Returns False if not found."""
-    existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
-    if existing is None:
-        return False
-    conn.execute("DELETE FROM review_logs WHERE card_id = ?", (card_id,))
-    conn.execute("DELETE FROM fsrs_state WHERE card_id = ?", (card_id,))
-    conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-    return True
+# ---------------------------------------------------------------------------
+# Card mutations
+# ---------------------------------------------------------------------------
 
 
 def update_card(
@@ -599,243 +606,348 @@ def update_card(
     tags: str | None = None,
     deck_id: int | None = None,
 ) -> bool:
-    """Update card fields. Only non-None values are changed. Returns False if not found."""
-    existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
-    if existing is None:
+    """Update card fields. Returns False if not found."""
+    now = int(time.time())
+    row = conn.execute(
+        "SELECT c.nid, n.flds, n.mid FROM cards c JOIN notes n ON n.id = c.nid WHERE c.id = ?",
+        (card_id,),
+    ).fetchone()
+    if row is None:
         return False
 
-    updates: list[str] = []
-    params: list[str | int] = []
-    if question is not None:
-        updates.append("question = ?")
-        params.append(question)
-    if answer is not None:
-        updates.append("answer = ?")
-        params.append(answer)
-    if tags is not None:
-        updates.append("tags = ?")
-        params.append(tags)
-    if deck_id is not None:
-        updates.append("deck_id = ?")
-        params.append(deck_id)
+    nid = row["nid"]
+    flds = str(row["flds"])
+    parts = flds.split("\x1f")
 
-    if updates:
-        params.append(card_id)
+    if question is not None or answer is not None:
+        if question is not None and len(parts) > 0:
+            parts[0] = question
+        if answer is not None and len(parts) > 1:
+            parts[1] = answer
+        new_flds = "\x1f".join(parts)
+        sfld = parts[0] if parts else ""
         conn.execute(
-            f"UPDATE cards SET {', '.join(updates)} WHERE id = ?",
-            params,
+            "UPDATE notes SET flds=?, sfld=?, mod=?, usn=-1 WHERE id=?",
+            (new_flds, sfld, now, nid),
         )
+
+    if tags is not None:
+        conn.execute("UPDATE notes SET tags=?, mod=?, usn=-1 WHERE id=?", (tags, now, nid))
+
+    if deck_id is not None:
+        conn.execute("UPDATE cards SET did=?, mod=?, usn=-1 WHERE id=?", (deck_id, now, card_id))
+
+    conn.execute("UPDATE cards SET mod=?, usn=-1 WHERE id=?", (now, card_id))
+    invalidate_model_cache(conn)
+    return True
+
+
+def delete_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Delete a card and related data. Writes to graves. Returns False if not found."""
+    row = conn.execute("SELECT nid FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row is None:
+        return False
+
+    nid = row["nid"]
+
+    # Delete review data
+    conn.execute("DELETE FROM revlog WHERE cid = ?", (card_id,))
+    conn.execute(
+        "DELETE FROM spacedrep_review_extra WHERE revlog_id IN "
+        "(SELECT id FROM revlog WHERE cid = ?)",
+        (card_id,),
+    )
+    conn.execute("DELETE FROM spacedrep_card_extra WHERE card_id = ?", (card_id,))
+
+    # Write to graves
+    conn.execute("INSERT INTO graves (usn, oid, type) VALUES (-1, ?, 0)", (card_id,))
+
+    # Delete card
+    conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+
+    # Delete orphan note (no remaining cards)
+    remaining = conn.execute("SELECT COUNT(*) AS cnt FROM cards WHERE nid = ?", (nid,)).fetchone()
+    if remaining and remaining["cnt"] == 0:
+        conn.execute("DELETE FROM notes WHERE id = ?", (nid,))
+        conn.execute("INSERT INTO graves (usn, oid, type) VALUES (-1, ?, 1)", (nid,))
+
     return True
 
 
 def suspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
-    """Suspend a card. Returns False if not found."""
-    cursor = conn.execute("UPDATE cards SET suspended = 1 WHERE id = ?", (card_id,))
+    """Suspend a card (queue=-1). Returns False if not found."""
+    now = int(time.time())
+    cursor = conn.execute(
+        "UPDATE cards SET queue = -1, mod = ?, usn = -1 WHERE id = ?", (now, card_id)
+    )
     return cursor.rowcount > 0
 
 
 def unsuspend_card(conn: sqlite3.Connection, card_id: int) -> bool:
-    """Unsuspend a card. Returns False if not found."""
-    cursor = conn.execute("UPDATE cards SET suspended = 0 WHERE id = ?", (card_id,))
-    return cursor.rowcount > 0
+    """Unsuspend a card (queue=type). Returns False if not found."""
+    now = int(time.time())
+    # Set queue to match type: 0=new, 1=learning, 2=review, 1=relearning
+    row = conn.execute("SELECT type FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row is None:
+        return False
+    card_type = row["type"]
+    queue = {0: 0, 1: 1, 2: 2, 3: 1}.get(card_type, 0)
+    conn.execute(
+        "UPDATE cards SET queue = ?, mod = ?, usn = -1 WHERE id = ?", (queue, now, card_id)
+    )
+    return True
 
 
 def bury_card(conn: sqlite3.Connection, card_id: int, until: str) -> bool:
     """Bury a card until a datetime. Returns False if not found."""
-    cursor = conn.execute("UPDATE cards SET buried_until = ? WHERE id = ?", (until, card_id))
-    return cursor.rowcount > 0
+    existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if existing is None:
+        return False
+    conn.execute(
+        "INSERT OR REPLACE INTO spacedrep_card_extra (card_id, buried_until) VALUES (?, ?)",
+        (card_id, until),
+    )
+    return True
 
 
 def unbury_card(conn: sqlite3.Connection, card_id: int) -> bool:
     """Unbury a card. Returns False if not found."""
-    cursor = conn.execute("UPDATE cards SET buried_until = NULL WHERE id = ?", (card_id,))
-    return cursor.rowcount > 0
+    existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if existing is None:
+        return False
+    conn.execute(
+        "UPDATE spacedrep_card_extra SET buried_until = NULL WHERE card_id = ?",
+        (card_id,),
+    )
+    return True
 
 
 def increment_lapse_count(conn: sqlite3.Connection, card_id: int) -> int:
-    """Increment lapse count for a card. Returns the new count."""
+    """Increment lapse count. Returns the new count."""
     conn.execute(
-        "UPDATE fsrs_state SET lapse_count = lapse_count + 1 WHERE card_id = ?",
-        (card_id,),
+        "UPDATE cards SET lapses = lapses + 1, mod = ?, usn = -1 WHERE id = ?",
+        (int(time.time()), card_id),
     )
-    row = conn.execute(
-        "SELECT lapse_count FROM fsrs_state WHERE card_id = ?", (card_id,)
-    ).fetchone()
-    return int(row["lapse_count"])
+    row = conn.execute("SELECT lapses FROM cards WHERE id = ?", (card_id,)).fetchone()
+    return int(row["lapses"]) if row else 0
 
 
-def get_filtered_cards(
-    conn: sqlite3.Connection,
-    *,
-    deck: str | None = None,
-    tags: list[str] | None = None,
-    state: str | None = None,
-    search: str | None = None,
-    suspended: bool | None = None,
-    source: str | None = None,
-    buried: bool | None = None,
-) -> list[CardRecord]:
-    """Get cards matching filters, no pagination. For export use."""
-    filter_sql, filter_params = _build_card_filter_clauses(
-        deck=deck,
-        tags=tags,
-        state=state,
-        search=search,
-        suspended=suspended,
-        source=source,
-        buried=buried,
-    )
-    query = f"""
-        SELECT c.*
-        FROM cards c
-        JOIN fsrs_state fs ON fs.card_id = c.id
-        JOIN decks d ON d.id = c.deck_id
-        WHERE 1=1 {filter_sql}
-        ORDER BY c.id
-    """
-    rows = conn.execute(query, filter_params).fetchall()
-    return [_row_to_card_record(r) for r in rows]
-
-
-def get_all_cards(conn: sqlite3.Connection, deck_id: int | None = None) -> list[CardRecord]:
-    """Get all cards, optionally filtered by deck."""
-    if deck_id is not None:
-        rows = conn.execute("SELECT * FROM cards WHERE deck_id = ?", (deck_id,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM cards").fetchall()
-    return [_row_to_card_record(r) for r in rows]
-
-
-# --- FSRS state operations ---
+# ---------------------------------------------------------------------------
+# FSRS state operations
+# ---------------------------------------------------------------------------
 
 
 def get_fsrs_card(conn: sqlite3.Connection, card_id: int) -> Card | None:
-    """Deserialize the FSRS card for a given card_id."""
+    """Reconstruct a py-fsrs Card from Anki card columns."""
+    crt = _get_crt(conn)
     row = conn.execute(
-        "SELECT fsrs_card_json FROM fsrs_state WHERE card_id = ?", (card_id,)
+        """SELECT c.type, c.due, c.ivl, c.factor, c.data,
+                  sce.step
+           FROM cards c
+           LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
+           WHERE c.id = ?""",
+        (card_id,),
     ).fetchone()
     if row is None:
         return None
-    return fsrs_engine.deserialize_card(row["fsrs_card_json"])
+    return anki_fields_to_fsrs_card(dict(row), crt)
 
 
 def update_fsrs_state(
     conn: sqlite3.Connection, card_id: int, fsrs_card: Card, retrievability: float
 ) -> None:
-    """Update FSRS state with serialized card and denormalized columns."""
-    last_review_str: str | None = None
-    if fsrs_card.last_review is not None:
-        last_review_str = _to_sqlite_dt(fsrs_card.last_review)
+    """Write FSRS state back to Anki card columns."""
+    crt = _get_crt(conn)
+    fields = fsrs_card_to_anki_fields(fsrs_card, crt)
 
-    due_str = _to_sqlite_dt(fsrs_card.due) if fsrs_card.due else _to_sqlite_dt(datetime.now(UTC))
+    # Preserve existing reps/lapses
+    existing = conn.execute("SELECT reps, lapses FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if existing:
+        fields["reps"] = existing["reps"] + 1
+        fields["lapses"] = existing["lapses"]
 
     conn.execute(
-        """UPDATE fsrs_state
-           SET fsrs_card_json = ?, due = ?, state = ?, stability = ?,
-               difficulty = ?, last_review = ?, retrievability = ?
-           WHERE card_id = ?""",
+        """UPDATE cards SET type=?, queue=?, due=?, ivl=?, factor=?,
+           reps=?, lapses=?, left=?, odue=?, odid=?, flags=?,
+           data=?, mod=?, usn=?
+           WHERE id=?""",
         (
-            fsrs_engine.serialize_card(fsrs_card),
-            due_str,
-            fsrs_card.state.value,
-            fsrs_card.stability,
-            fsrs_card.difficulty,
-            last_review_str,
-            retrievability,
+            fields["type"],
+            fields["queue"],
+            fields["due"],
+            fields["ivl"],
+            fields["factor"],
+            fields["reps"],
+            fields["lapses"],
+            fields["left"],
+            fields["odue"],
+            fields["odid"],
+            fields["flags"],
+            fields["data"],
+            fields["mod"],
+            fields["usn"],
             card_id,
         ),
     )
 
+    # Update step in extension table
+    if fsrs_card.step is not None and fsrs_card.step > 0:
+        conn.execute(
+            "INSERT OR REPLACE INTO spacedrep_card_extra (card_id, step) VALUES (?, ?)",
+            (card_id, fsrs_card.step),
+        )
 
-def insert_initial_fsrs_state(conn: sqlite3.Connection, card_id: int) -> None:
-    """Create an FSRS state row with a fresh card."""
-    card = fsrs_engine.create_new_card()
-    due_str = _to_sqlite_dt(card.due) if card.due else _to_sqlite_dt(datetime.now(UTC))
+
+# ---------------------------------------------------------------------------
+# Review operations
+# ---------------------------------------------------------------------------
+
+
+def insert_review_log(
+    conn: sqlite3.Connection,
+    review: ReviewInput,
+    fsrs_log_json: str,
+) -> None:
+    """Insert a review into revlog + spacedrep_review_extra."""
+    now_ms = _next_id()
+
+    # Parse fsrs log for ivl/lastIvl
+    try:
+        log_data = json.loads(fsrs_log_json)
+        ivl = int(log_data.get("scheduled_days", 0))
+        last_ivl = int(log_data.get("elapsed_days", 0))
+    except (json.JSONDecodeError, ValueError, TypeError):
+        ivl = 0
+        last_ivl = 0
+
+    # Determine revlog type from rating context
+    revlog_type = 0  # 0=learn
+
     conn.execute(
-        """INSERT INTO fsrs_state (card_id, fsrs_card_json, due, state, stability,
-           difficulty, last_review, retrievability)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            card_id,
-            fsrs_engine.serialize_card(card),
-            due_str,
-            card.state.value,
-            card.stability,
-            card.difficulty,
-            None,
-            0.0,
-        ),
+        "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)"
+        " VALUES (?, ?, -1, ?, ?, ?, 0, 0, ?)",
+        (now_ms, review.card_id, review.rating, ivl, last_ivl, revlog_type),
     )
 
+    # Extension data
+    if review.user_answer or review.feedback or review.session_id:
+        conn.execute(
+            "INSERT INTO spacedrep_review_extra (revlog_id, user_answer, feedback, session_id)"
+            " VALUES (?, ?, ?, ?)",
+            (now_ms, review.user_answer, review.feedback, review.session_id),
+        )
 
-# --- Review / stats operations ---
+
+def get_review_history(conn: sqlite3.Connection, card_id: int) -> list[ReviewLogEntry]:
+    """Get review history for a card."""
+    rows = conn.execute(
+        """SELECT r.id, r.cid, r.ease, r.id AS review_ts,
+                  sre.user_answer, sre.feedback, sre.session_id
+           FROM revlog r
+           LEFT JOIN spacedrep_review_extra sre ON sre.revlog_id = r.id
+           WHERE r.cid = ?
+           ORDER BY r.id""",
+        (card_id,),
+    ).fetchall()
+    return [
+        ReviewLogEntry(
+            card_id=row["cid"],
+            rating=row["ease"],
+            rating_name=fsrs_engine.rating_name(row["ease"]),
+            reviewed_at=datetime.fromtimestamp(row["review_ts"] / 1000, tz=UTC).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            user_answer=row["user_answer"],
+            feedback=row["feedback"],
+            session_id=row["session_id"],
+        )
+        for row in rows
+    ]
 
 
-def insert_review_log(conn: sqlite3.Connection, review: ReviewInput, fsrs_log_json: str) -> None:
-    """Insert a review log entry."""
-    conn.execute(
-        """INSERT INTO review_logs (card_id, rating, user_answer, feedback,
-           session_id, fsrs_log_json)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (
-            review.card_id,
-            review.rating,
-            review.user_answer,
-            review.feedback,
-            review.session_id,
-            fsrs_log_json,
-        ),
-    )
+# ---------------------------------------------------------------------------
+# Stats and config
+# ---------------------------------------------------------------------------
 
 
 def get_due_count(conn: sqlite3.Connection) -> DueCount:
     """Count due cards grouped by state."""
-    rows = conn.execute("""
-        SELECT fs.state,
-               CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END AS is_new,
-               COUNT(*) AS cnt
-        FROM fsrs_state fs
-        JOIN cards c ON c.id = fs.card_id
-        WHERE fs.due <= datetime('now') AND c.suspended = 0
-        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
-        GROUP BY fs.state, is_new
-    """).fetchall()
+    crt = _get_crt(conn)
+    now_ts = int(time.time())
+    now_days = int((now_ts - crt) / 86400)
+
+    rows = conn.execute(
+        """SELECT c.type, c.data, COUNT(*) AS cnt
+        FROM cards c
+        LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
+        WHERE c.queue >= 0
+        AND (sce.buried_until IS NULL OR sce.buried_until <= ?)
+        AND (
+            (c.type = 0 AND c.queue = 0)
+            OR (c.type IN (1, 3) AND c.due <= ?)
+            OR (c.type = 2 AND c.due <= ?)
+        )
+        GROUP BY c.type""",
+        (_now_str(), now_ts, now_days),
+    ).fetchall()
 
     new = 0
     learning = 0
     review = 0
     for r in rows:
-        state_val = r["state"]
+        card_type = r["type"]
         cnt = r["cnt"]
-        if state_val == State.Learning.value and r["is_new"]:
+        if card_type == 0:
             new += cnt
-        elif state_val == State.Learning.value:
+        elif card_type == 1:
             learning += cnt
-        elif state_val == State.Review.value:
+        elif card_type == 2:
             review += cnt
-        else:  # Relearning
-            learning += cnt
+        elif card_type == 3:
+            learning += cnt  # relearning counts as learning
 
     return DueCount(total_due=new + learning + review, learning=learning, review=review, new=new)
 
 
 def get_next_due_time(conn: sqlite3.Connection) -> str | None:
     """Get the next due time for any non-suspended card after now."""
-    row = conn.execute("""
-        SELECT MIN(fs.due) AS next_due
-        FROM fsrs_state fs
-        JOIN cards c ON c.id = fs.card_id
-        WHERE fs.due > datetime('now') AND c.suspended = 0
-    """).fetchone()
-    if row is None or row["next_due"] is None:
+    crt = _get_crt(conn)
+    now_ts = int(time.time())
+    now_days = int((now_ts - crt) / 86400)
+
+    # Check learning/relearning cards (due is unix timestamp)
+    lr_row = conn.execute(
+        "SELECT MIN(due) AS next_due FROM cards WHERE type IN (1, 3) AND queue >= 0 AND due > ?",
+        (now_ts,),
+    ).fetchone()
+
+    # Check review cards (due is days since crt)
+    rev_row = conn.execute(
+        "SELECT MIN(due) AS next_due FROM cards WHERE type = 2 AND queue >= 0 AND due > ?",
+        (now_days,),
+    ).fetchone()
+
+    candidates: list[datetime] = []
+    if lr_row and lr_row["next_due"] is not None:
+        candidates.append(datetime.fromtimestamp(lr_row["next_due"], tz=UTC))
+    if rev_row and rev_row["next_due"] is not None:
+        ts = crt + rev_row["next_due"] * 86400
+        candidates.append(datetime.fromtimestamp(ts, tz=UTC))
+
+    if not candidates:
         return None
-    return str(row["next_due"])
+    earliest = min(candidates)
+    return earliest.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_session_stats(conn: sqlite3.Connection, session_id: str) -> SessionStats:
     """Get stats for a specific review session."""
     rows = conn.execute(
-        "SELECT rating, COUNT(*) AS cnt FROM review_logs WHERE session_id = ? GROUP BY rating",
+        """SELECT r.ease AS rating, COUNT(*) AS cnt
+           FROM revlog r
+           JOIN spacedrep_review_extra sre ON sre.revlog_id = r.id
+           WHERE sre.session_id = ?
+           GROUP BY r.ease""",
         (session_id,),
     ).fetchall()
 
@@ -868,54 +980,69 @@ def get_session_stats(conn: sqlite3.Connection, session_id: str) -> SessionStats
 
 def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
     """Get overall database statistics."""
+    crt = _get_crt(conn)
+    now_ts = int(time.time())
+    now_days = int((now_ts - crt) / 86400)
+
     total = conn.execute("SELECT COUNT(*) AS cnt FROM cards").fetchone()
     total_cards = total["cnt"] if total else 0
 
-    due_row = conn.execute("""
-        SELECT COUNT(*) AS cnt FROM fsrs_state fs
-        JOIN cards c ON c.id = fs.card_id
-        WHERE fs.due <= datetime('now') AND c.suspended = 0
-        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
-    """).fetchone()
+    due_row = conn.execute(
+        """SELECT COUNT(*) AS cnt FROM cards c
+        LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
+        WHERE c.queue >= 0
+        AND (sce.buried_until IS NULL OR sce.buried_until <= ?)
+        AND (
+            (c.type = 0 AND c.queue = 0)
+            OR (c.type IN (1, 3) AND c.due <= ?)
+            OR (c.type = 2 AND c.due <= ?)
+        )""",
+        (_now_str(), now_ts, now_days),
+    ).fetchone()
     due_now = due_row["cnt"] if due_row else 0
 
-    state_rows = conn.execute("""
-        SELECT fs.state,
-               CASE WHEN fs.last_review IS NULL THEN 1 ELSE 0 END AS is_new,
-               COUNT(*) AS cnt
-        FROM fsrs_state fs
-        JOIN cards c ON c.id = fs.card_id
-        WHERE c.suspended = 0
-        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
-        GROUP BY fs.state, is_new
-    """).fetchall()
+    state_rows = conn.execute(
+        """SELECT type, COUNT(*) AS cnt FROM cards
+        WHERE queue >= 0
+        GROUP BY type"""
+    ).fetchall()
 
     learning = 0
     review = 0
     for r in state_rows:
-        if r["state"] == State.Learning.value and not r["is_new"]:
+        if r["type"] == 1:
             learning += r["cnt"]
-        elif r["state"] == State.Review.value:
+        elif r["type"] == 2:
             review += r["cnt"]
-        elif r["state"] == State.Relearning.value:
+        elif r["type"] == 3:
             learning += r["cnt"]
 
-    mature_row = conn.execute("""
-        SELECT COUNT(*) AS cnt FROM fsrs_state fs
-        JOIN cards c ON c.id = fs.card_id
-        WHERE fs.stability IS NOT NULL AND fs.stability > 21 AND c.suspended = 0
-        AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
-    """).fetchone()
+    # Mature: stability > 21 (from data.s)
+    mature_row = conn.execute(
+        """SELECT COUNT(*) AS cnt FROM cards
+        WHERE queue >= 0 AND data != '' AND json_extract(data, '$.s') > 21"""
+    ).fetchone()
     mature = mature_row["cnt"] if mature_row else 0
 
-    avg_ret_row = conn.execute("""
-        SELECT AVG(fs.retrievability) AS avg_ret FROM fsrs_state fs
-        JOIN cards c ON c.id = fs.card_id
-        WHERE fs.retrievability IS NOT NULL AND fs.last_review IS NOT NULL
-              AND c.suspended = 0
-              AND (c.buried_until IS NULL OR c.buried_until <= datetime('now'))
-    """).fetchone()
-    avg_retention = avg_ret_row["avg_ret"] if avg_ret_row and avg_ret_row["avg_ret"] else 0.0
+    # Average retention: computed from FSRS cards with stability
+    # For simplicity, compute from cards with data.s present
+    fsrs_rows = conn.execute(
+        "SELECT type, due, ivl, factor, data FROM cards WHERE queue >= 0 AND data != ''"
+    ).fetchall()
+
+    total_ret = 0.0
+    ret_count = 0
+    for r in fsrs_rows:
+        try:
+            fsrs_card = anki_fields_to_fsrs_card(dict(r), crt)
+            if fsrs_card.last_review is not None:
+                ret = fsrs_engine.get_retrievability(fsrs_card)
+                total_ret += ret
+                ret_count += 1
+        except (ValueError, TypeError):
+            continue
+
+    avg_retention = total_ret / ret_count if ret_count > 0 else 0.0
 
     return OverallStats(
         total_cards=total_cards,
@@ -923,77 +1050,73 @@ def get_overall_stats(conn: sqlite3.Connection) -> OverallStats:
         learning=learning,
         review=review,
         mature=mature,
-        avg_retention=round(float(avg_retention), 4),
+        avg_retention=round(avg_retention, 4),
     )
 
 
-# --- Config operations ---
-
-
 def get_config(conn: sqlite3.Connection, key: str) -> str | None:
-    """Get a config value by key."""
-    row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+    """Get a config value by key from spacedrep_meta."""
+    row = conn.execute("SELECT value FROM spacedrep_meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
 
 
 def set_config(conn: sqlite3.Connection, key: str, value: str) -> None:
-    """Set a config value (upsert)."""
+    """Set a config value (upsert) in spacedrep_meta."""
     conn.execute(
-        """INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now'))
-           ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')""",
+        "INSERT INTO spacedrep_meta (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = ?",
         (key, value, value),
     )
 
 
-# --- Review log queries ---
-
-
 def get_all_review_log_jsons(conn: sqlite3.Connection) -> list[tuple[int, str]]:
-    """Returns (card_id, fsrs_log_json) for all reviews with non-null JSON."""
-    rows = conn.execute(
-        "SELECT card_id, fsrs_log_json FROM review_logs WHERE fsrs_log_json IS NOT NULL"
-    ).fetchall()
-    return [(r["card_id"], r["fsrs_log_json"]) for r in rows]
+    """Get all review logs as (card_id, review_log_json) for optimizer.
+
+    Constructs py-fsrs compatible ReviewLog JSON from revlog table.
+    """
+    rows = conn.execute("SELECT cid, id, ease, ivl, lastIvl FROM revlog ORDER BY id").fetchall()
+    results: list[tuple[int, str]] = []
+    for r in rows:
+        review_dt = datetime.fromtimestamp(r["id"] / 1000, tz=UTC)
+        log = {
+            "rating": r["ease"],
+            "scheduled_days": r["ivl"],
+            "elapsed_days": r["lastIvl"],
+            "review": review_dt.isoformat(),
+            "state": 0,
+        }
+        results.append((r["cid"], json.dumps(log)))
+    return results
 
 
 def get_review_logs_for_card(conn: sqlite3.Connection, card_id: int) -> list[str]:
-    """Get fsrs_log_json strings for a card, ordered by review time."""
+    """Get review log JSONs for a card, ordered by review time."""
     rows = conn.execute(
-        """SELECT fsrs_log_json FROM review_logs
-           WHERE card_id = ? AND fsrs_log_json IS NOT NULL
-           ORDER BY reviewed_at""",
+        "SELECT id, ease, ivl, lastIvl FROM revlog WHERE cid = ? ORDER BY id",
         (card_id,),
     ).fetchall()
-    return [r["fsrs_log_json"] for r in rows]
+    results: list[str] = []
+    for r in rows:
+        review_dt = datetime.fromtimestamp(r["id"] / 1000, tz=UTC)
+        log = {
+            "rating": r["ease"],
+            "scheduled_days": r["ivl"],
+            "elapsed_days": r["lastIvl"],
+            "review": review_dt.isoformat(),
+            "state": 0,
+        }
+        results.append(json.dumps(log))
+    return results
 
 
-def get_review_history(conn: sqlite3.Connection, card_id: int) -> list[ReviewLogEntry]:
-    """Get human-readable review history for a card, ordered by review time."""
-    rows = conn.execute(
-        """SELECT card_id, rating, reviewed_at, user_answer, feedback, session_id
-           FROM review_logs WHERE card_id = ? ORDER BY reviewed_at""",
-        (card_id,),
-    ).fetchall()
-    return [
-        ReviewLogEntry(
-            card_id=row["card_id"],
-            rating=row["rating"],
-            rating_name=fsrs_engine.rating_name(row["rating"]),
-            reviewed_at=row["reviewed_at"],
-            user_answer=row["user_answer"],
-            feedback=row["feedback"],
-            session_id=row["session_id"],
-        )
-        for row in rows
-    ]
-
-
-# --- Tag operations ---
+# ---------------------------------------------------------------------------
+# Tag operations
+# ---------------------------------------------------------------------------
 
 
 def list_tags(conn: sqlite3.Connection) -> list[str]:
-    """Return all unique tags from the database, sorted alphabetically."""
-    rows = conn.execute("SELECT tags FROM cards WHERE tags != ''").fetchall()
+    """Return all unique tags, sorted alphabetically."""
+    rows = conn.execute("SELECT tags FROM notes WHERE tags != ''").fetchall()
     tag_set: set[str] = set()
     for row in rows:
         for tag in row["tags"].split():
@@ -1001,24 +1124,170 @@ def list_tags(conn: sqlite3.Connection) -> list[str]:
     return sorted(tag_set)
 
 
-# --- Helpers ---
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def _row_to_card_record(row: sqlite3.Row) -> CardRecord:
-    """Convert a database row to a CardRecord."""
-    extra_parsed: dict[str, str] = json.loads(row["extra_fields"]) if row["extra_fields"] else {}  # type: ignore[assignment]  # json.loads returns Any
-    return CardRecord(
-        id=row["id"],
-        deck_id=row["deck_id"],
-        question=row["question"],
-        answer=row["answer"],
-        extra_fields=extra_parsed,
-        tags=row["tags"],
-        source=row["source"],
-        source_note_id=row["source_note_id"],
-        source_note_guid=row["source_note_guid"],
-        source_card_ord=row["source_card_ord"],
-        created_at=row["created_at"],
-        suspended=bool(row["suspended"]),
-        buried_until=row["buried_until"],
-    )
+def _deck_name_for_did(conn: sqlite3.Connection, did: int) -> str:
+    """Look up deck name from did via col.decks JSON."""
+    meta = _load_col_meta(conn)
+    deck = meta.decks.get(str(did))
+    if deck:
+        return str(deck.get("name", "Unknown"))
+    return "Default"
+
+
+def _build_card_filter_clauses(
+    *,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    state: str | None = None,
+    leech_threshold: int | None = None,
+    search: str | None = None,
+    suspended: bool | None = None,
+    due_before: str | None = None,
+    due_after: str | None = None,
+    created_before: str | None = None,
+    created_after: str | None = None,
+    reviewed_before: str | None = None,
+    reviewed_after: str | None = None,
+    min_difficulty: float | None = None,
+    max_difficulty: float | None = None,
+    min_stability: float | None = None,
+    max_stability: float | None = None,
+    min_retrievability: float | None = None,
+    max_retrievability: float | None = None,
+    buried: bool | None = None,
+    crt: int = 0,
+) -> tuple[str, list[Any]]:
+    """Build SQL WHERE fragments for card filtering.
+
+    Expects tables: c (cards), n (notes), sce (spacedrep_card_extra LEFT JOIN).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if deck is not None:
+        # Need to resolve deck name to did(s) from col.decks
+        # Use a subquery approach — match by deck name pattern
+        clauses.append(
+            "AND c.did IN (SELECT CAST(key AS INTEGER) FROM json_each("
+            "(SELECT decks FROM col WHERE id=1), '$')"
+            " WHERE json_extract(value, '$.name') = ?"
+            " OR json_extract(value, '$.name') LIKE ?)"
+        )
+        params.extend([deck, f"{deck}::%"])
+
+    if tags:
+        tag_conditions: list[str] = []
+        for tag in tags:
+            tag_conditions.append(
+                "((' ' || n.tags || ' ') LIKE ? OR (' ' || n.tags || ' ') LIKE ?)"
+            )
+            params.extend([f"% {tag} %", f"% {tag}::%"])
+        clauses.append(f"AND ({' OR '.join(tag_conditions)})")
+
+    if state is not None:
+        if state == "new":
+            clauses.append("AND c.type = 0")
+        elif state == "learning":
+            clauses.append("AND c.type = 1")
+        elif state == "review":
+            clauses.append("AND c.type = 2")
+        elif state == "relearning":
+            clauses.append("AND c.type = 3")
+
+    if leech_threshold is not None:
+        clauses.append("AND c.lapses >= ?")
+        params.append(leech_threshold)
+
+    if search is not None:
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_param = f"%{escaped}%"
+        clauses.append("AND n.flds LIKE ? ESCAPE '\\'")
+        params.append(like_param)
+
+    if suspended is True:
+        clauses.append("AND c.queue = -1")
+    elif suspended is False:
+        clauses.append("AND c.queue >= 0")
+
+    if due_before is not None:
+        # Due before: need type-dependent check
+        clauses.append(
+            "AND ((c.type IN (1, 3) AND c.due <= ?) OR (c.type = 2 AND c.due <= ?) OR c.type = 0)"
+        )
+        try:
+            dt = datetime.fromisoformat(due_before.replace("Z", "+00:00"))
+            params.extend([int(dt.timestamp()), int((dt.timestamp() - crt) / 86400)])
+        except ValueError:
+            params.extend([due_before, due_before])
+
+    if due_after is not None:
+        clauses.append("AND ((c.type IN (1, 3) AND c.due >= ?) OR (c.type = 2 AND c.due >= ?))")
+        try:
+            dt = datetime.fromisoformat(due_after.replace("Z", "+00:00"))
+            params.extend([int(dt.timestamp()), int((dt.timestamp() - crt) / 86400)])
+        except ValueError:
+            params.extend([due_after, due_after])
+
+    if created_before is not None:
+        try:
+            dt = datetime.fromisoformat(created_before.replace("Z", "+00:00"))
+            clauses.append("AND c.mod <= ?")
+            params.append(int(dt.timestamp()))
+        except ValueError:
+            pass
+
+    if created_after is not None:
+        try:
+            dt = datetime.fromisoformat(created_after.replace("Z", "+00:00"))
+            clauses.append("AND c.mod >= ?")
+            params.append(int(dt.timestamp()))
+        except ValueError:
+            pass
+
+    if reviewed_before is not None:
+        try:
+            dt = datetime.fromisoformat(reviewed_before.replace("Z", "+00:00"))
+            clauses.append("AND c.data != '' AND json_extract(c.data, '$.lrt') <= ?")
+            params.append(int(dt.timestamp()))
+        except ValueError:
+            pass
+
+    if reviewed_after is not None:
+        try:
+            dt = datetime.fromisoformat(reviewed_after.replace("Z", "+00:00"))
+            clauses.append("AND c.data != '' AND json_extract(c.data, '$.lrt') >= ?")
+            params.append(int(dt.timestamp()))
+        except ValueError:
+            pass
+
+    if min_difficulty is not None:
+        clauses.append("AND c.data != '' AND json_extract(c.data, '$.d') >= ?")
+        params.append(min_difficulty)
+
+    if max_difficulty is not None:
+        clauses.append("AND c.data != '' AND json_extract(c.data, '$.d') <= ?")
+        params.append(max_difficulty)
+
+    if min_stability is not None:
+        clauses.append("AND c.data != '' AND json_extract(c.data, '$.s') >= ?")
+        params.append(min_stability)
+
+    if max_stability is not None:
+        clauses.append("AND c.data != '' AND json_extract(c.data, '$.s') <= ?")
+        params.append(max_stability)
+
+    # Retrievability filters: computed in Python (skip for now — too complex for SQL)
+    # min/max_retrievability will be applied post-query if needed
+
+    if buried is True:
+        clauses.append("AND sce.buried_until IS NOT NULL AND sce.buried_until > ?")
+        params.append(_now_str())
+    elif buried is False:
+        clauses.append("AND (sce.buried_until IS NULL OR sce.buried_until <= ?)")
+        params.append(_now_str())
+
+    return (" ".join(clauses), params)

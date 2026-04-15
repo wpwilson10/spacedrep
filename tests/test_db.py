@@ -263,6 +263,96 @@ def test_delete_card_not_found(populated_db: Path) -> None:
     conn.close()
 
 
+def test_delete_card_cleans_up_review_extra(tmp_db: Path) -> None:
+    """Verify delete_card removes spacedrep_review_extra rows (not just revlog)."""
+    from spacedrep.models import ReviewInput
+
+    conn = db.get_connection(tmp_db)
+    card_id, _ = db.insert_card(
+        conn, question="Q", answer="A", deck_name="Test", guid=basic_guid("Q", "Test")
+    )
+
+    # Simulate a review with extension data
+    review = ReviewInput(card_id=card_id, rating=3, user_answer="my answer", session_id="sess1")
+    db.insert_review_log(conn, review, '{"scheduled_days": 1, "elapsed_days": 0}')
+    conn.commit()
+
+    # Verify review_extra row exists
+    extra = conn.execute(
+        "SELECT 1 FROM spacedrep_review_extra WHERE session_id = 'sess1'"
+    ).fetchone()
+    assert extra is not None
+
+    # Delete the card
+    assert db.delete_card(conn, card_id)
+    conn.commit()
+
+    # Both revlog and review_extra should be gone
+    revlog = conn.execute("SELECT 1 FROM revlog WHERE cid = ?", (card_id,)).fetchone()
+    assert revlog is None
+    extra_after = conn.execute(
+        "SELECT 1 FROM spacedrep_review_extra WHERE session_id = 'sess1'"
+    ).fetchone()
+    assert extra_after is None
+    conn.close()
+
+
+def test_bury_preserves_source(tmp_db: Path) -> None:
+    """Burying a card must not clobber spacedrep_card_extra.source."""
+    conn = db.get_connection(tmp_db)
+    card_id, _ = db.insert_card(
+        conn,
+        question="Q",
+        answer="A",
+        deck_name="Test",
+        source="apkg",
+        guid=basic_guid("Q", "Test"),
+    )
+    conn.commit()
+
+    # Bury the card
+    db.bury_card(conn, card_id, "2099-01-01 00:00:00")
+    conn.commit()
+
+    # Source should still be 'apkg'
+    row = conn.execute(
+        "SELECT source, buried_until FROM spacedrep_card_extra WHERE card_id = ?",
+        (card_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["source"] == "apkg"
+    assert row["buried_until"] == "2099-01-01 00:00:00"
+    conn.close()
+
+
+def test_update_step_preserves_buried_until(tmp_db: Path) -> None:
+    """Updating FSRS step must not clobber spacedrep_card_extra.buried_until."""
+    from fsrs import Card
+
+    conn = db.get_connection(tmp_db)
+    card_id, _ = db.insert_card(
+        conn, question="Q", answer="A", deck_name="Test", guid=basic_guid("Q", "Test")
+    )
+
+    # Bury first
+    db.bury_card(conn, card_id, "2099-01-01 00:00:00")
+
+    # Simulate FSRS state update with step > 0
+    fsrs_card = Card()
+    fsrs_card.step = 2
+    db.update_fsrs_state(conn, card_id, fsrs_card, 0.9)
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT step, buried_until FROM spacedrep_card_extra WHERE card_id = ?",
+        (card_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["step"] == 2
+    assert row["buried_until"] == "2099-01-01 00:00:00"
+    conn.close()
+
+
 # --- update_card tests ---
 
 

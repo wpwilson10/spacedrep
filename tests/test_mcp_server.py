@@ -287,9 +287,18 @@ class TestImportDeck:
         """Export then import — verifies import_deck works end to end."""
         apkg = tmp_path / "roundtrip.apkg"
         export_deck(str(apkg))
-        result = import_deck(str(apkg))
+        result = import_deck(str(apkg), force=True)
         assert result["card_count"] >= 0
         assert "decks" in result
+
+    def test_import_default_force_false_blocks(
+        self, card_id: int, tmp_db: Path, tmp_path: Path
+    ) -> None:
+        """Default force=False should error when DB already has cards."""
+        apkg = tmp_path / "roundtrip.apkg"
+        export_deck(str(apkg))
+        with pytest.raises(ToolError, match="already has"):
+            import_deck(str(apkg))
 
     def test_import_missing_file(self, tmp_db: Path) -> None:
         with pytest.raises(ToolError):

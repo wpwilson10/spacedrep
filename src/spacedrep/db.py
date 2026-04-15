@@ -302,7 +302,8 @@ def insert_card(
     # Insert source into extension table
     if source != "manual":
         conn.execute(
-            "INSERT OR REPLACE INTO spacedrep_card_extra (card_id, source) VALUES (?, ?)",
+            "INSERT INTO spacedrep_card_extra (card_id, source) VALUES (?, ?)"
+            " ON CONFLICT(card_id) DO UPDATE SET source = excluded.source",
             (card_id, source),
         )
 
@@ -655,13 +656,13 @@ def delete_card(conn: sqlite3.Connection, card_id: int) -> bool:
 
     nid = row["nid"]
 
-    # Delete review data
-    conn.execute("DELETE FROM revlog WHERE cid = ?", (card_id,))
+    # Delete review data (review_extra first — its subquery reads revlog)
     conn.execute(
         "DELETE FROM spacedrep_review_extra WHERE revlog_id IN "
         "(SELECT id FROM revlog WHERE cid = ?)",
         (card_id,),
     )
+    conn.execute("DELETE FROM revlog WHERE cid = ?", (card_id,))
     conn.execute("DELETE FROM spacedrep_card_extra WHERE card_id = ?", (card_id,))
 
     # Write to graves
@@ -709,7 +710,8 @@ def bury_card(conn: sqlite3.Connection, card_id: int, until: str) -> bool:
     if existing is None:
         return False
     conn.execute(
-        "INSERT OR REPLACE INTO spacedrep_card_extra (card_id, buried_until) VALUES (?, ?)",
+        "INSERT INTO spacedrep_card_extra (card_id, buried_until) VALUES (?, ?)"
+        " ON CONFLICT(card_id) DO UPDATE SET buried_until = excluded.buried_until",
         (card_id, until),
     )
     return True
@@ -798,7 +800,8 @@ def update_fsrs_state(
     # Update step in extension table
     if fsrs_card.step is not None and fsrs_card.step > 0:
         conn.execute(
-            "INSERT OR REPLACE INTO spacedrep_card_extra (card_id, step) VALUES (?, ?)",
+            "INSERT INTO spacedrep_card_extra (card_id, step) VALUES (?, ?)"
+            " ON CONFLICT(card_id) DO UPDATE SET step = excluded.step",
             (card_id, fsrs_card.step),
         )
 

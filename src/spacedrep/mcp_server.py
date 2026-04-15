@@ -477,16 +477,15 @@ def list_decks() -> dict[str, object]:
 @_handle_errors
 def import_deck(
     apkg_path: Annotated[str, Field(description="Absolute path to .apkg file on disk")],
+    force: Annotated[
+        bool, Field(description="Replace existing database without safety check")
+    ] = False,
 ) -> dict[str, Any]:
-    """Import an Anki .apkg deck file. Specify the absolute file path on disk.
-    Merges cards into the current collection."""
+    """Open an Anki .apkg deck file as the working database. Replaces the
+    current database. Use force=True to overwrite a database that already
+    has cards."""
     validated = _validate_file_path(apkg_path, must_exist=True)
-    return _serialize(
-        core.import_deck(
-            _db_path(),
-            validated,
-        )
-    )
+    return _serialize(core.open_deck(_db_path(), validated, force=force))
 
 
 @mcp.tool()

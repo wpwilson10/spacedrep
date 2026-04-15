@@ -288,8 +288,7 @@ class TestImportDeck:
         apkg = tmp_path / "roundtrip.apkg"
         export_deck(str(apkg))
         result = import_deck(str(apkg))
-        assert result["imported"] >= 0
-        assert result["updated"] >= 0
+        assert result["card_count"] >= 0
         assert "decks" in result
 
     def test_import_missing_file(self, tmp_db: Path) -> None:

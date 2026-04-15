@@ -21,7 +21,6 @@ classifiers = [
 dependencies = [
     "typer>=0.15",
     "fsrs>=6.3,<7",
-    "genanki>=0.13",
     "pydantic>=2.0",
     "beautifulsoup4>=4.12",
 ]

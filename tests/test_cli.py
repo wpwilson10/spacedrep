@@ -685,7 +685,7 @@ class TestDryRun:
             data = json.loads(result.stdout)
             assert data["suspended"] is False
 
-    def test_import_dry_run(self) -> None:
+    def test_import_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             _init_db(db_path)
@@ -696,21 +696,11 @@ class TestDryRun:
             result = _run(["deck", "export", str(apkg_path)], db_path)
             assert result.returncode == 0
 
-            # Dry-run import into a fresh DB
-            db2_path = Path(tmpdir) / "test2.db"
-            _run(["db", "init"], db2_path)
-
-            result = _run(["deck", "import", str(apkg_path), "--dry-run"], db2_path)
+            # Import with --force into same DB (replaces everything)
+            result = _run(["deck", "import", str(apkg_path), "--force"], db_path)
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["dry_run"] is True
-            assert data["imported"] >= 1
-
-            # DB should still be empty
-            result = _run(["card", "list"], db2_path)
-            assert result.returncode == 0
-            data = json.loads(result.stdout)
-            assert data["total"] == 0
+            assert data["card_count"] >= 0
 
     def test_delete_dry_run_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

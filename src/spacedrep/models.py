@@ -1,34 +1,10 @@
 """Pydantic data models used across the codebase."""
 
-from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
 CardSource = Literal["apkg", "manual", "generated"]
-
-
-class DeckRecord(BaseModel):
-    id: int | None = None
-    name: str
-    source_id: int | None = None
-    created_at: datetime | None = None
-
-
-class CardRecord(BaseModel):
-    id: int | None = None
-    deck_id: int
-    question: str
-    answer: str
-    extra_fields: dict[str, str] = {}
-    tags: str = ""
-    source: CardSource = "manual"
-    source_note_id: int | None = None
-    source_note_guid: str | None = None
-    source_card_ord: int = 0
-    created_at: datetime | None = None
-    suspended: bool = False
-    buried_until: str | None = None
 
 
 class ReviewInput(BaseModel):
@@ -76,16 +52,6 @@ class DeckInfo(BaseModel):
     name: str
     card_count: int
     due_count: int
-
-
-class ImportResult(BaseModel):
-    imported: int
-    updated: int
-    decks: list[str]
-    fields: list[str]
-    question_field: str
-    answer_field: str
-    dry_run: bool = False
 
 
 class SessionStats(BaseModel):

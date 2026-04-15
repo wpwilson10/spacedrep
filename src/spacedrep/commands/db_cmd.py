@@ -18,7 +18,7 @@ def init(
 
     Example:
         spacedrep db init
-        spacedrep db init --db ~/study/reviews.db
+        spacedrep db init --db ~/study/collection.anki21
     """
     try:
         result = core.init_database(db)

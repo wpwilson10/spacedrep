@@ -25,7 +25,7 @@ def _reset_fsrs_params() -> Generator[None, None, None]:  # pyright: ignore[repo
 def _clear_model_cache() -> Generator[None, None, None]:  # pyright: ignore[reportUnusedFunction]
     """Clear model cache after each test to prevent cross-test bleed."""
     yield
-    db._model_cache.clear()
+    db.clear_all_model_caches()
 
 
 @pytest.fixture

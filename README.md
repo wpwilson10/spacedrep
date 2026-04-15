@@ -43,7 +43,7 @@ See `spacedrep --help` and `spacedrep <command> --help` for all options.
 
 - **FSRS scheduling** — same algorithm as Anki 23.10+, with parameter optimization from your review history
 - **Cloze deletions** — `{{c1::answer}}` syntax, auto-expands into multiple cards
-- **Anki import/export** — round-trip `.apkg` support including cloze notes (see compatibility below)
+- **Anki-native storage** — operates directly on Anki's SQLite schema for full round-trip scheduling
 - **Rich filtering** — by deck, tags, state, date ranges, FSRS properties, and more
 - **Agent-friendly** — duplicate detection, leech detection, review preview, bury/unbury, review history
 - **SQLite storage** — single file, SQL-queryable
@@ -74,18 +74,18 @@ spacedrep card list --due-before "2026-12-31" --min-difficulty 5.0
 spacedrep card list --leeches
 spacedrep card history 42
 spacedrep card bury 42 --hours 4
-spacedrep deck export out.apkg --tags aws --state review
+spacedrep deck export out.apkg
 ```
 
-Filters work on `card list`, `card next`, and `deck export`. See `--help` for the full list.
+Filters work on `card list` and `card next`. Export saves the entire collection. See `--help` for the full list.
 
 ## Anki Compatibility
 
-Import handles the common card types: **Basic**, **Basic (and reversed)**, and **Cloze** deletions. Suspended cards, deck hierarchy, and tags are preserved.
+spacedrep operates directly on Anki's native SQLite schema. Opening an `.apkg` replaces the working database with the `.apkg`'s contents — all cards, decks, scheduling state, and review history are preserved. Saving writes the working database back to an `.apkg` that Anki can open.
 
-This is not a full Anki reimplementation. Things that are **not supported**: media files (images/audio are stripped to text), templates with JavaScript or conditional sections, nested cloze deletions, and scheduling data (imported cards start fresh with FSRS). Export writes basic and cloze notes. Suspended cards are tagged `suspended` on export.
+FSRS state is stored in Anki's native card columns (`type`, `queue`, `due`, `ivl`, `cards.data`), so scheduling survives round-trips. Cards reviewed in spacedrep and saved back to `.apkg` will show correct due dates when opened in Anki.
 
-Re-importing the same `.apkg` updates existing cards rather than creating duplicates.
+Things that are **not supported**: media files (images/audio are stripped to text), templates with JavaScript or conditional sections, and nested cloze deletions.
 
 ## MCP Server
 
@@ -102,7 +102,7 @@ pip install spacedrep[mcp]
 
 **Claude Code:**
 ```bash
-claude mcp add spacedrep -e SPACEDREP_DB=/path/to/reviews.db -- uv run --directory /path/to/spacedrep spacedrep-mcp
+claude mcp add spacedrep -e SPACEDREP_DB=/path/to/collection.anki21 -- uv run --directory /path/to/spacedrep spacedrep-mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
@@ -120,4 +120,4 @@ claude mcp add spacedrep -e SPACEDREP_DB=/path/to/reviews.db -- uv run --directo
 }
 ```
 
-Set `SPACEDREP_DB` to configure the database path (default: `./reviews.db`).
+Set `SPACEDREP_DB` to configure the database path (default: `./collection.anki21`).

@@ -167,6 +167,11 @@ def invalidate_model_cache(conn: sqlite3.Connection) -> None:
     _model_cache.pop(id(conn), None)
 
 
+def clear_all_model_caches() -> None:
+    """Clear all model caches. For test cleanup."""
+    _model_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Deck operations
 # ---------------------------------------------------------------------------

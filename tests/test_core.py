@@ -500,122 +500,53 @@ def test_params_loaded_from_config(tmp_db: Path) -> None:
 # --- Anki compatibility import tests ---
 
 
-def test_import_cloze_produces_cards(tmp_db: Path, cloze_apkg: Path) -> None:
-    """Import cloze apkg. Both cards share the same note guid, so the second
-    card update overwrites the first, resulting in 1 note and 1 card in DB."""
-    result = core.import_deck(tmp_db, cloze_apkg)
-    # Two card records from apkg share guid "guid1": first inserts, second updates
-    assert result.imported + result.updated == 2
-    cards = core.list_cards(tmp_db).cards
-    # With guid-based dedup, only 1 card exists (second overwrites first)
-    assert len(cards) >= 1
-    questions = {c.question for c in cards}
-    assert any("[...]" in q for q in questions)
+def test_open_deck_cloze(tmp_db: Path, cloze_apkg: Path) -> None:
+    """open_deck replaces DB with .apkg contents, including cloze cards."""
+    result = core.open_deck(tmp_db, cloze_apkg, force=True)
+    assert result.card_count == 2
+    assert "Default" in result.decks
 
 
-def test_import_cloze_content(tmp_db: Path, cloze_apkg: Path) -> None:
-    """After importing cloze, the surviving card has cloze-rendered content."""
-    core.import_deck(tmp_db, cloze_apkg)
-    cards = core.list_cards(tmp_db).cards
-    assert len(cards) >= 1
-    detail = core.get_card_detail(tmp_db, cards[0].card_id)
-    # The surviving card should have cloze-blanked question with [...]
-    assert "[...]" in detail.question
+def test_open_deck_basic_reversed(tmp_db: Path, basic_reversed_apkg: Path) -> None:
+    """open_deck loads basic+reversed cards from .apkg."""
+    result = core.open_deck(tmp_db, basic_reversed_apkg, force=True)
+    assert result.card_count == 2
 
 
-def test_import_basic_reversed_produces_card(tmp_db: Path, basic_reversed_apkg: Path) -> None:
-    """Import basic+reversed apkg. Both cards share the same note guid,
-    so the second card overwrites the first, resulting in 1 card."""
-    result = core.import_deck(tmp_db, basic_reversed_apkg)
-    assert result.imported + result.updated == 2
-    cards = core.list_cards(tmp_db).cards
-    assert len(cards) >= 1
-
-
-def test_import_suspended_cards(tmp_db: Path, suspended_apkg: Path) -> None:
-    """Import apkg with a suspended card. The import function does not
-    preserve suspension status, so both cards appear active."""
-    result = core.import_deck(tmp_db, suspended_apkg)
-    assert result.imported == 2
+def test_open_deck_suspended(tmp_db: Path, suspended_apkg: Path) -> None:
+    """open_deck preserves suspension status from the .apkg."""
+    result = core.open_deck(tmp_db, suspended_apkg, force=True)
+    assert result.card_count == 2
     cards = core.list_cards(tmp_db).cards
     assert len(cards) == 2
-    # Import does not carry over Anki suspension status
-    questions = {c.question for c in cards}
-    assert "Active Q" in questions
-    assert "Suspended Q" in questions
 
 
-def test_import_mixed_apkg(tmp_db: Path, mixed_apkg: Path) -> None:
-    """Import mixed apkg. Multi-card notes share guids, so second card of
-    each multi-card note updates the first. 3 unique guids -> 3 notes/cards."""
-    result = core.import_deck(tmp_db, mixed_apkg)
-    # 5 card records but only 3 unique guids (guidA, guidB, guidC)
-    # First of each guid: imported; second of cloze + reversed: updated
-    assert result.imported == 3
-    assert result.updated == 2
-    cards = core.list_cards(tmp_db).cards
-    assert len(cards) == 3
+def test_open_deck_mixed(tmp_db: Path, mixed_apkg: Path) -> None:
+    """open_deck loads mixed .apkg with cloze, reversed, and suspended cards."""
+    result = core.open_deck(tmp_db, mixed_apkg, force=True)
+    assert result.card_count == 5
+    assert result.deck_count >= 2
 
 
-def test_import_dedup_composite_key(tmp_db: Path, cloze_apkg: Path) -> None:
-    """Re-importing the same apkg deduplicates on notes.guid."""
-    first = core.import_deck(tmp_db, cloze_apkg)
-    # Two card records with same guid: 1 insert + 1 update
-    assert first.imported + first.updated == 2
-    total_after_first = core.list_cards(tmp_db).total
-
-    second = core.import_deck(tmp_db, cloze_apkg)
-    # Both cards now find existing note by guid -> all updates
-    assert second.imported == 0
-    assert second.updated == 2
-    # Same number of cards as after first import
-    assert core.list_cards(tmp_db).total == total_after_first
+def test_open_deck_idempotent(tmp_db: Path, cloze_apkg: Path) -> None:
+    """Re-opening the same .apkg produces the same result."""
+    first = core.open_deck(tmp_db, cloze_apkg, force=True)
+    second = core.open_deck(tmp_db, cloze_apkg, force=True)
+    assert first.card_count == second.card_count
 
 
-def test_import_reimport_updates_content(
-    tmp_db: Path, suspended_apkg: Path, tmp_path_factory: pytest.TempPathFactory
-) -> None:
-    """Re-import with changed content updates the cards."""
-    from tests.conftest import BASIC_MODEL, DEFAULT_DECK, build_anki_apkg
-
-    core.import_deck(tmp_db, suspended_apkg)
-    cards_before = core.list_cards(tmp_db).cards
-    assert len(cards_before) == 2
-
-    # Build a modified apkg with same guids but different content
-    tmp = tmp_path_factory.mktemp("reimport")
-    modified_apkg = build_anki_apkg(
-        tmp,
-        "modified",
-        models=BASIC_MODEL,
-        decks=DEFAULT_DECK,
-        notes=[
-            (300, "1000", "Updated Active Q\x1fUpdated Active A", "guid3", ""),
-            (301, "1000", "Updated Suspended Q\x1fUpdated Suspended A", "guid4", ""),
-        ],
-        cards=[
-            (5, 300, 1, 0, 0),
-            (6, 301, 1, 0, 0),
-        ],
-    )
-    result = core.import_deck(tmp_db, modified_apkg)
-    assert result.updated == 2
-
-    cards_after = core.list_cards(tmp_db).cards
-    assert len(cards_after) == 2
-    questions = {c.question for c in cards_after}
-    assert "Updated Active Q" in questions
-    assert "Updated Suspended Q" in questions
+def test_open_deck_safety_check(tmp_db: Path, cloze_apkg: Path) -> None:
+    """open_deck without force errors if DB already has cards."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    with pytest.raises(core.ApkgImportError):
+        core.open_deck(tmp_db, cloze_apkg, force=False)
 
 
-def test_import_dry_run_multi_card(tmp_db: Path, mixed_apkg: Path) -> None:
-    result = core.import_deck(tmp_db, mixed_apkg, dry_run=True)
-    assert result.dry_run is True
-    # Dry run checks notes.guid in DB (empty), so all are "would import"
-    # But cards with same guid count multiple times in dry_run
-    assert result.imported + result.updated >= 3
-    # No cards actually written
-    assert core.list_cards(tmp_db).total == 0
+def test_open_deck_force_overrides_safety(tmp_db: Path, cloze_apkg: Path) -> None:
+    """open_deck with force=True replaces DB even if it has cards."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    result = core.open_deck(tmp_db, cloze_apkg, force=True)
+    assert result.card_count == 2
 
 
 # --- Cloze creation tests ---

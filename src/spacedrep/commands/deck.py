@@ -35,26 +35,23 @@ def list_decks(
 @deck_app.command("import")
 def import_deck(
     path: Path = typer.Argument(..., help="Path to .apkg file"),
-    question_field: str | None = typer.Option(None, "--question-field", help="Question field name"),
-    answer_field: str | None = typer.Option(None, "--answer-field", help="Answer field name"),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Preview what would be imported without writing"
+    force: bool = typer.Option(
+        False, "--force", help="Replace existing database without safety check"
     ),
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Output imported count only"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Output card count only"),
     db: Path = DB_DEFAULT,
 ) -> None:
-    """Import an .apkg deck file.
+    """Open an .apkg deck file as the working database.
 
     Example:
         spacedrep deck import ~/Downloads/DSA_FAANG.apkg
-        spacedrep deck import deck.apkg --question-field Prompt --answer-field Implementation
-        spacedrep deck import deck.apkg --dry-run
+        spacedrep deck import deck.apkg --force
         spacedrep deck import deck.apkg -q
     """
     try:
-        result = core.import_deck(db, path, question_field, answer_field, dry_run=dry_run)
+        result = core.open_deck(db, path, force=force)
         if quiet:
-            output_quiet(result.imported)
+            output_quiet(result.card_count)
         else:
             output_json(result)
     except core.SpacedrepError as e:

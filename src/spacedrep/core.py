@@ -26,7 +26,6 @@ from spacedrep.models import (
     DeckInfo,
     DueCount,
     FsrsStatus,
-    ImportResult,
     OpenResult,
     OptimizeResult,
     OverallStats,
@@ -780,90 +779,13 @@ def import_deck(
     answer_field: str | None = None,
     *,
     dry_run: bool = False,
-) -> ImportResult:
-    """Import an .apkg file into the database."""
-    from spacedrep.apkg_reader import read_apkg
+) -> OpenResult:
+    """Import an .apkg file into the database.
 
-    if not apkg_path.exists():
-        raise ApkgImportError(f"File not found: {apkg_path}")
-    if apkg_path.suffix.lower() != ".apkg":
-        raise ApkgImportError(
-            f"Expected .apkg file, got '{apkg_path.suffix or 'no extension'}': {apkg_path.name}"
-        )
-
-    try:
-        decks, cards, field_info, note_deck_map = read_apkg(apkg_path, question_field, answer_field)
-    except Exception as e:
-        raise ApkgImportError(f"Failed to read .apkg: {e}") from e
-
-    fields_val = field_info.get("fields", [])
-    fields_list: list[str] = fields_val if isinstance(fields_val, list) else []
-    q_val = field_info.get("question_field", "")
-    q_str: str = q_val if isinstance(q_val, str) else ""
-    a_val = field_info.get("answer_field", "")
-    a_str: str = a_val if isinstance(a_val, str) else ""
-    deck_names = [d.name for d in decks]
-    first_deck = decks[0].name if decks else "Unknown"
-
-    if dry_run:
-        with _open_db(db_path) as conn:
-            would_import = 0
-            would_update = 0
-            for card in cards:
-                card_guid = card.source_note_guid or basic_guid(card.question, first_deck)
-                existing = conn.execute(
-                    "SELECT 1 FROM notes WHERE guid = ?", (card_guid,)
-                ).fetchone()
-                if existing:
-                    would_update += 1
-                else:
-                    would_import += 1
-            return ImportResult(
-                imported=would_import,
-                updated=would_update,
-                decks=deck_names if deck_names else [first_deck],
-                fields=fields_list,
-                question_field=q_str,
-                answer_field=a_str,
-                dry_run=True,
-            )
-
-    with _open_db(db_path) as conn:
-        imported = 0
-        updated = 0
-
-        for card in cards:
-            # Resolve per-card deck from the (note_id, ord)->deck mapping
-            note_id = card.source_note_id
-            if note_id is not None and (note_id, card.source_card_ord) in note_deck_map:
-                card_deck = note_deck_map[(note_id, card.source_card_ord)]
-            else:
-                card_deck = first_deck
-
-            card_guid = card.source_note_guid or basic_guid(card.question, card_deck)
-            _, was_update = db.insert_card(
-                conn,
-                question=card.question,
-                answer=card.answer,
-                deck_name=card_deck,
-                tags=card.tags,
-                source="apkg",
-                guid=card_guid,
-            )
-            if was_update:
-                updated += 1
-            else:
-                imported += 1
-
-        conn.commit()
-        return ImportResult(
-            imported=imported,
-            updated=updated,
-            decks=deck_names if deck_names else [first_deck],
-            fields=fields_list,
-            question_field=q_str,
-            answer_field=a_str,
-        )
+    Delegates to open_deck(). The question_field, answer_field, and dry_run
+    parameters are ignored — kept for API compatibility during transition.
+    """
+    return open_deck(db_path, apkg_path, force=True)
 
 
 def export_deck(

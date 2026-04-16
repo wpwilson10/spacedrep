@@ -103,3 +103,9 @@ Filters work on `card list` and `card next`. See `--help` for the full list.
 spacedrep operates directly on Anki's native SQLite schema. Importing an `.apkg` replaces the working database; exporting writes it back. FSRS scheduling state survives the round-trip — cards reviewed in spacedrep show correct due dates when opened in Anki.
 
 Media files, JavaScript templates, and nested cloze deletions are not supported.
+
+## Data Storage
+
+Your database is a single SQLite file (`collection.anki21` by default). Every card addition and review is committed immediately — if the agent disconnects or the process crashes, no work is lost.
+
+You don't need to export after every session. The `.apkg` import/export tools are for moving data between spacedrep and Anki Desktop, not for saving your progress.

@@ -453,9 +453,12 @@ def submit_review(
     feedback: Annotated[str, Field(description="Feedback on the answer")] = "",
     session_id: Annotated[str, Field(description="Session ID for grouping reviews")] = "",
 ) -> dict[str, Any]:
-    """Submit a review rating for a flashcard. Rating: 1=again, 2=hard, 3=good,
-    4=easy. Optionally include the user's answer text and a session ID for
-    grouping reviews."""
+    """Submit a review rating for a flashcard. The agent should determine the
+    rating by comparing the user's answer to the card's correct answer — do not
+    ask the user to pick a number. Rating: 1=again (wrong or no answer),
+    2=hard (partially correct or missing key details), 3=good (correct),
+    4=easy (use only if the user explicitly says it was easy). Always pass the
+    user's original answer text in the answer field."""
     review_input = ReviewInput(
         card_id=card_id,
         rating=rating,

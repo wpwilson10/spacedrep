@@ -1270,7 +1270,9 @@ def _build_card_filter_clauses(
             dt = datetime.fromisoformat(due_before.replace("Z", "+00:00"))
             params.extend([int(dt.timestamp()), int((dt.timestamp() - crt) / 86400)])
         except ValueError:
-            params.extend([due_before, due_before])
+            from spacedrep.core import InvalidDateError
+
+            raise InvalidDateError("due_before", due_before) from None
 
     if due_after is not None:
         clauses.append(
@@ -1280,7 +1282,9 @@ def _build_card_filter_clauses(
             dt = datetime.fromisoformat(due_after.replace("Z", "+00:00"))
             params.extend([int(dt.timestamp()), int((dt.timestamp() - crt) / 86400)])
         except ValueError:
-            params.extend([due_after, due_after])
+            from spacedrep.core import InvalidDateError
+
+            raise InvalidDateError("due_after", due_after) from None
 
     if created_before is not None:
         try:
@@ -1288,7 +1292,9 @@ def _build_card_filter_clauses(
             clauses.append("AND c.mod <= ?")
             params.append(int(dt.timestamp()))
         except ValueError:
-            pass
+            from spacedrep.core import InvalidDateError
+
+            raise InvalidDateError("created_before", created_before) from None
 
     if created_after is not None:
         try:
@@ -1296,7 +1302,9 @@ def _build_card_filter_clauses(
             clauses.append("AND c.mod >= ?")
             params.append(int(dt.timestamp()))
         except ValueError:
-            pass
+            from spacedrep.core import InvalidDateError
+
+            raise InvalidDateError("created_after", created_after) from None
 
     if reviewed_before is not None:
         try:
@@ -1304,7 +1312,9 @@ def _build_card_filter_clauses(
             clauses.append("AND c.data != '' AND json_extract(c.data, '$.lrt') <= ?")
             params.append(int(dt.timestamp()))
         except ValueError:
-            pass
+            from spacedrep.core import InvalidDateError
+
+            raise InvalidDateError("reviewed_before", reviewed_before) from None
 
     if reviewed_after is not None:
         try:
@@ -1312,7 +1322,9 @@ def _build_card_filter_clauses(
             clauses.append("AND c.data != '' AND json_extract(c.data, '$.lrt') >= ?")
             params.append(int(dt.timestamp()))
         except ValueError:
-            pass
+            from spacedrep.core import InvalidDateError
+
+            raise InvalidDateError("reviewed_after", reviewed_after) from None
 
     # FSRS property expressions with fallbacks for unreviewed cards.
     # Matches display logic in anki_schema.anki_fields_to_fsrs_card():

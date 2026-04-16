@@ -136,6 +136,9 @@ class BulkCardInput(BaseModel):
         if self.type == "basic" and not self.answer.strip():
             msg = "Basic cards require a non-empty answer"
             raise ValueError(msg)
+        if not self.deck.strip():
+            msg = "Deck name cannot be empty or whitespace-only"
+            raise ValueError(msg)
         return self
 
 

@@ -195,6 +195,28 @@ class CardSuspendedError(SpacedrepError):
         )
 
 
+class ExportError(SpacedrepError):
+    def __init__(self, message: str, suggestion: str = "") -> None:
+        super().__init__(
+            error_code="export_error",
+            message=message,
+            suggestion=suggestion or "Check the output path and try again",
+            exit_code=2,
+        )
+
+
+class InvalidDateError(SpacedrepError):
+    def __init__(self, field: str, value: str) -> None:
+        super().__init__(
+            error_code="invalid_date",
+            message=f"Invalid date for '{field}': {value!r}",
+            suggestion="Use ISO 8601 format, e.g. '2025-01-15' or '2025-01-15T10:30:00'",
+            exit_code=2,
+            field=field,
+            value=value,
+        )
+
+
 # Concurrency note: _params_loaded guards a one-time load of FSRS parameters
 # from the database into the module-level scheduler. This is safe because
 # FastMCP serializes tool calls via asyncio (single-threaded). If concurrency
@@ -356,6 +378,8 @@ def add_card(
         raise EmptyFieldError("question")
     if not answer.strip():
         raise EmptyFieldError("answer")
+    if not deck.strip():
+        raise EmptyFieldError("deck")
     with _open_db(db_path) as conn:
         guid = basic_guid(question, deck)
         card_id, was_update = db.insert_card(
@@ -492,6 +516,8 @@ def add_cloze_note(
     """Add a cloze deletion note that expands into multiple flashcards."""
     if not _CLOZE_PATTERN.search(text):
         raise NoClozeMarkersError()
+    if not deck.strip():
+        raise EmptyFieldError("deck")
 
     guid = cloze_guid(text)
     with _open_db(db_path) as conn:
@@ -705,6 +731,8 @@ def update_card(
     with _open_db(db_path) as conn:
         deck_id: int | None = None
         if deck is not None:
+            if not deck.strip():
+                raise EmptyFieldError("deck")
             deck_id = db.upsert_deck(conn, deck)
 
         result = db.update_card(
@@ -916,6 +944,11 @@ def save_deck(db_path: Path, output_path: Path) -> SaveResult:
     """
     if not db_path.exists():
         raise DatabaseNotFoundError(db_path)
+    if not output_path.parent.exists():
+        raise ExportError(
+            message=f"Output directory does not exist: {output_path.parent}",
+            suggestion="Create the parent directory first, or use an existing path",
+        )
 
     # Count cards before packaging
     conn = db.get_connection(db_path)
@@ -1050,7 +1083,9 @@ def optimize_parameters(
                 parameters=params,
                 review_count=len(review_logs),
                 rescheduled=cards_with_reviews if reschedule and not is_default else 0,
-                message="Dry run: no changes applied",
+                message="Dry run: parameters would be optimized"
+                if not is_default
+                else f"Dry run: need {512 - len(review_logs)} more reviews for optimization",
             )
 
         if not is_default:

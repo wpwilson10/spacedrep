@@ -299,12 +299,26 @@ def list_cards(
         suspended_bool = True
     elif suspended == "false":
         suspended_bool = False
+    elif suspended:
+        raise core.SpacedrepError(
+            error_code="invalid_filter",
+            message=f"Invalid value for suspended: {suspended!r}",
+            suggestion="Use 'true', 'false', or '' (empty for no filter)",
+            exit_code=2,
+        )
 
     buried_bool: bool | None = None
     if buried == "true":
         buried_bool = True
     elif buried == "false":
         buried_bool = False
+    elif buried:
+        raise core.SpacedrepError(
+            error_code="invalid_filter",
+            message=f"Invalid value for buried: {buried!r}",
+            suggestion="Use 'true', 'false', or '' (empty for no filter)",
+            exit_code=2,
+        )
 
     def _float_or_none(v: float) -> float | None:
         return v if v >= 0 else None

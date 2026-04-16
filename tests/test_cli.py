@@ -414,8 +414,10 @@ class TestDeck:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             # Anki schema always has a Default deck
-            assert isinstance(data, list)
-            names: list[str] = [d["name"] for d in data]  # type: ignore[union-attr]  # json list
+            assert isinstance(data, dict)
+            assert "decks" in data
+            assert "count" in data
+            names: list[str] = [d["name"] for d in data["decks"]]
             assert "Default" in names
 
     def test_export(self) -> None:

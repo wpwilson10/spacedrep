@@ -126,15 +126,15 @@ class BulkCardInput(BaseModel):
     answer: str = ""
     deck: str = "Default"
     tags: str = ""
-    type: Literal["basic", "cloze"] = "basic"
+    type: Literal["basic", "cloze", "reversed"] = "basic"
 
     @model_validator(mode="after")
     def _validate_fields(self) -> "BulkCardInput":
         if not self.question.strip():
             msg = "Question cannot be empty or whitespace-only"
             raise ValueError(msg)
-        if self.type == "basic" and not self.answer.strip():
-            msg = "Basic cards require a non-empty answer"
+        if self.type in ("basic", "reversed") and not self.answer.strip():
+            msg = f"{self.type.capitalize()} cards require a non-empty answer"
             raise ValueError(msg)
         if not self.deck.strip():
             msg = "Deck name cannot be empty or whitespace-only"
@@ -144,6 +144,15 @@ class BulkCardInput(BaseModel):
 
 class ClozeAddResult(BaseModel):
     """Result of cloze note creation."""
+
+    note_id: int
+    card_ids: list[int]
+    card_count: int
+    deck: str
+
+
+class ReversedAddResult(BaseModel):
+    """Result of reversed card pair creation (1 note + 2 cards)."""
 
     note_id: int
     card_ids: list[int]

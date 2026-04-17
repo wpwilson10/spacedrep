@@ -25,6 +25,7 @@ AnkiJson = dict[str, Any]
 
 BASIC_MODEL_ID = int(hashlib.sha256(b"spacedrep").hexdigest()[:8], 16)
 CLOZE_MODEL_ID = int(hashlib.sha256(b"spacedrep-cloze").hexdigest()[:8], 16)
+BASIC_REVERSED_MODEL_ID = int(hashlib.sha256(b"spacedrep-reversed").hexdigest()[:8], 16)
 
 
 def _deck_id_from_name(name: str) -> int:
@@ -69,6 +70,57 @@ _BASIC_MODEL: AnkiJson = {
             "ord": 0,
             "qfmt": "{{Question}}",
             "afmt": '{{FrontSide}}<hr id="answer">{{Answer}}',
+            "did": None,
+        },
+    ],
+    "css": (
+        ".card { font-family: arial; font-size: 20px;"
+        " text-align: center; color: black; background-color: white; }"
+    ),
+    "vers": [],
+    "mod": 0,
+}
+
+_BASIC_REVERSED_MODEL: AnkiJson = {
+    "id": BASIC_REVERSED_MODEL_ID,
+    "name": "spacedrep-reversed",
+    "type": 0,
+    "sortf": 0,
+    "did": 1,
+    "usn": -1,
+    "flds": [
+        {
+            "name": "Question",
+            "ord": 0,
+            "sticky": False,
+            "rtl": False,
+            "font": "Arial",
+            "size": 20,
+            "media": [],
+        },
+        {
+            "name": "Answer",
+            "ord": 1,
+            "sticky": False,
+            "rtl": False,
+            "font": "Arial",
+            "size": 20,
+            "media": [],
+        },
+    ],
+    "tmpls": [
+        {
+            "name": "Card 1",
+            "ord": 0,
+            "qfmt": "{{Question}}",
+            "afmt": '{{FrontSide}}<hr id="answer">{{Answer}}',
+            "did": None,
+        },
+        {
+            "name": "Card 2",
+            "ord": 1,
+            "qfmt": "{{Answer}}",
+            "afmt": '{{FrontSide}}<hr id="answer">{{Question}}',
             "did": None,
         },
     ],
@@ -337,6 +389,7 @@ class ColMeta:
             models={
                 str(BASIC_MODEL_ID): _BASIC_MODEL,
                 str(CLOZE_MODEL_ID): _CLOZE_MODEL,
+                str(BASIC_REVERSED_MODEL_ID): _BASIC_REVERSED_MODEL,
             },
             decks=default_deck,
             dconf=_DEFAULT_DCONF,
@@ -410,20 +463,26 @@ class ColMeta:
         return deck_id
 
     def ensure_model(self, model_type: str) -> int:
-        """Get the model ID for 'basic' or 'cloze'. Adds model if missing.
+        """Get the model ID for 'basic', 'cloze', or 'reversed'. Adds model if missing.
 
         Args:
-            model_type: "basic" or "cloze".
+            model_type: "basic", "cloze", or "reversed".
 
         Returns:
             The model ID.
+
+        Raises:
+            ValueError: if model_type is not one of the supported values.
         """
-        if model_type == "cloze":
-            mid = CLOZE_MODEL_ID
-            template = _CLOZE_MODEL
+        if model_type == "basic":
+            mid, template = BASIC_MODEL_ID, _BASIC_MODEL
+        elif model_type == "cloze":
+            mid, template = CLOZE_MODEL_ID, _CLOZE_MODEL
+        elif model_type == "reversed":
+            mid, template = BASIC_REVERSED_MODEL_ID, _BASIC_REVERSED_MODEL
         else:
-            mid = BASIC_MODEL_ID
-            template = _BASIC_MODEL
+            msg = f"Unknown model_type: {model_type!r}. Must be 'basic', 'cloze', or 'reversed'."
+            raise ValueError(msg)
 
         mid_str = str(mid)
         if mid_str not in self.models:
@@ -650,3 +709,16 @@ def cloze_guid(cloze_text: str) -> str:
     Returns a 10-char hex string for Anki's notes.guid field.
     """
     return hashlib.sha256(cloze_text.encode()).hexdigest()[:10]
+
+
+def reversed_guid(question: str, deck_name: str) -> str:
+    """Generate a deterministic GUID for a reversed note.
+
+    Namespaced with a "reversed" prefix so it cannot collide with basic_guid
+    for the same (question, deck) pair — the two live in separate GUID spaces
+    by note type. Dedup is on (question, deck), so re-adding with a changed
+    answer updates the existing note and preserves review history.
+
+    Returns a 10-char hex string for Anki's notes.guid field.
+    """
+    return hashlib.sha256(f"reversed\x1f{question}\x1f{deck_name}".encode()).hexdigest()[:10]

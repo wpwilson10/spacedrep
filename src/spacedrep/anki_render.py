@@ -162,6 +162,27 @@ def find_field_index(names_lower: list[str], candidates: set[str]) -> int | None
     return None
 
 
+def resolve_card_qa_fields(model_info: "ModelInfo", card_ord: int) -> tuple[int | None, int | None]:
+    """Resolve the (question_field_idx, answer_field_idx) for a given card ord.
+
+    For single-template basic models, uses name-based detection. For
+    multi-template basic models (e.g. basic+reversed), parses the specific
+    template at card_ord to find which field appears first in qfmt vs afmt.
+    For cloze models, returns (None, None) — the "question" is the cloze
+    text itself, not a separate field.
+    """
+    if model_info.model_type == 1:
+        return (None, None)
+    field_map = {name: i for i, name in enumerate(model_info.field_names)}
+    if card_ord < len(model_info.templates):
+        tmpl = model_info.templates[card_ord]
+        qi = _first_real_field(tmpl.get("qfmt", ""), field_map)
+        ai = _first_real_field(tmpl.get("afmt", ""), field_map)
+        if qi is not None and ai is not None:
+            return (qi, ai)
+    return detect_field_mapping(model_info.field_names, None, None)
+
+
 def resolve_template_fields(
     templates: list[dict[str, str]],
     card_ord: int,

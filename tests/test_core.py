@@ -1057,3 +1057,219 @@ def test_list_cards_retrievability_filter(tmp_db: Path) -> None:
     # But not with min_retrievability=1.1 (impossible value)
     cards = core.list_cards(tmp_db, min_retrievability=1.1)
     assert cards.total == 0
+
+
+# --- Reversed card creation tests ---
+
+
+class TestAddReversedCard:
+    def test_creates_two_cards_one_note(self, tmp_db: Path) -> None:
+        """add_reversed_card produces 2 cards from 1 note with swapped Q/A."""
+        result = core.add_reversed_card(
+            tmp_db, "Capital of France", "Paris", deck="geo", tags="geography"
+        )
+        assert result.card_count == 2
+        assert len(result.card_ids) == 2
+        assert result.card_ids[0] != result.card_ids[1]
+        assert result.deck == "geo"
+
+        # Forward card: Q="Capital of France", A="Paris"
+        d0 = core.get_card_detail(tmp_db, result.card_ids[0])
+        assert d0.question == "Capital of France"
+        assert d0.answer == "Paris"
+        assert d0.deck == "geo"
+        assert d0.tags == "geography"
+
+        # Reversed card: Q="Paris", A="Capital of France"
+        d1 = core.get_card_detail(tmp_db, result.card_ids[1])
+        assert d1.question == "Paris"
+        assert d1.answer == "Capital of France"
+
+    def test_dedup_updates_in_place(self, tmp_db: Path) -> None:
+        """Re-adding with same (question, deck) updates the note; card_ids stable."""
+        r1 = core.add_reversed_card(tmp_db, "Q", "A1", deck="d")
+        r2 = core.add_reversed_card(tmp_db, "Q", "A2", deck="d")
+        assert r1.card_ids == r2.card_ids
+        assert r1.note_id == r2.note_id
+
+        # Both cards reflect the new answer text
+        assert core.get_card_detail(tmp_db, r2.card_ids[0]).answer == "A2"
+        assert core.get_card_detail(tmp_db, r2.card_ids[1]).question == "A2"
+
+    def test_dedup_preserves_review_history(self, tmp_db: Path) -> None:
+        """Updating the answer via re-add does not drop review history."""
+        r = core.add_reversed_card(tmp_db, "Q", "A1", deck="d")
+        forward_id = r.card_ids[0]
+        core.submit_review(tmp_db, ReviewInput(card_id=forward_id, rating=3))
+
+        core.add_reversed_card(tmp_db, "Q", "A2", deck="d")
+        history = core.get_review_history(tmp_db, forward_id)
+        assert history.total == 1
+
+    def test_empty_tags_preserves_existing(self, tmp_db: Path) -> None:
+        """Re-adding with empty tags does not clobber existing tags."""
+        r1 = core.add_reversed_card(tmp_db, "Q", "A", deck="d", tags="t1 t2")
+        core.add_reversed_card(tmp_db, "Q", "A-new", deck="d")  # no tags
+        d = core.get_card_detail(tmp_db, r1.card_ids[0])
+        assert d.tags == "t1 t2"
+
+    def test_empty_answer_raises(self, tmp_db: Path) -> None:
+        with pytest.raises(core.EmptyFieldError, match="answer"):
+            core.add_reversed_card(tmp_db, "Q", "", deck="d")
+
+    def test_empty_question_raises(self, tmp_db: Path) -> None:
+        with pytest.raises(core.EmptyFieldError, match="question"):
+            core.add_reversed_card(tmp_db, "", "A", deck="d")
+
+    def test_different_decks_are_separate_notes(self, tmp_db: Path) -> None:
+        r1 = core.add_reversed_card(tmp_db, "Q", "A", deck="d1")
+        r2 = core.add_reversed_card(tmp_db, "Q", "A", deck="d2")
+        assert r1.note_id != r2.note_id
+        assert set(r1.card_ids).isdisjoint(r2.card_ids)
+
+
+class TestAddCardsBulkReversed:
+    def test_bulk_mixed_types(self, tmp_db: Path) -> None:
+        """Bulk can mix basic, cloze, and reversed entries in one transaction."""
+        from spacedrep.models import BulkCardInput
+
+        cards = [
+            BulkCardInput(question="Basic Q", answer="Basic A", deck="d"),
+            BulkCardInput(question="{{c1::cloze}}", type="cloze", deck="d"),
+            BulkCardInput(question="Rev Q", answer="Rev A", type="reversed", deck="d"),
+        ]
+        result = core.add_cards_bulk(tmp_db, cards)
+        # 1 basic + 1 cloze + 2 reversed = 4
+        assert result.count == 4
+        assert len(result.created) == 4
+
+    def test_bulk_reversed_missing_answer_raises(self, tmp_db: Path) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="Reversed cards require"):
+            # Validator rejects at construction time
+            from spacedrep.models import BulkCardInput
+
+            BulkCardInput(question="Q", answer="", type="reversed", deck="d")
+
+
+# --- Template-aware update_card tests ---
+
+
+class TestUpdateCardTemplateAware:
+    def test_basic_card_positional_semantics_unchanged(self, tmp_db: Path) -> None:
+        """Basic (single-template) cards still update question→field 0, answer→field 1."""
+        r = core.add_card(tmp_db, "Q-old", "A-old", deck="d")
+        cid = int(r["card_id"])
+        detail = core.update_card(tmp_db, cid, question="Q-new", answer="A-new")
+        assert detail.question == "Q-new"
+        assert detail.answer == "A-new"
+
+    def test_reversed_ord0_question_updates_its_front(self, tmp_db: Path) -> None:
+        """Editing the forward card's question updates its front and the
+        reversed card's back (shared-note invariant)."""
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        forward, reverse = r.card_ids
+        core.update_card(tmp_db, forward, question="Q-new")
+        assert core.get_card_detail(tmp_db, forward).question == "Q-new"
+        assert core.get_card_detail(tmp_db, reverse).answer == "Q-new"
+
+    def test_reversed_ord1_question_updates_that_cards_front(self, tmp_db: Path) -> None:
+        """Editing the reversed card's question updates *that* card's front
+        (the Answer field), not the other card's front. Bug-fix pin."""
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        forward, reverse = r.card_ids
+        core.update_card(tmp_db, reverse, question="new-front")
+        # The reversed card's rendered front (its "question") is now "new-front"
+        assert core.get_card_detail(tmp_db, reverse).question == "new-front"
+        # And the forward card's back reflects the same underlying field
+        assert core.get_card_detail(tmp_db, forward).answer == "new-front"
+        # The forward card's front is unchanged
+        assert core.get_card_detail(tmp_db, forward).question == "Q"
+
+    def test_reversed_ord1_answer_updates_that_cards_back(self, tmp_db: Path) -> None:
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        forward, reverse = r.card_ids
+        core.update_card(tmp_db, reverse, answer="new-back")
+        assert core.get_card_detail(tmp_db, reverse).answer == "new-back"
+        assert core.get_card_detail(tmp_db, forward).question == "new-back"
+
+    def test_cloze_card_raises_update_cloze_card_error(self, tmp_db: Path) -> None:
+        """update_card on a cloze card points the caller at update_cloze_note."""
+        r = core.add_cloze_note(tmp_db, "{{c1::Ottawa}} is a city", deck="d")
+        cid = r.card_ids[0]
+        with pytest.raises(core.UpdateClozeCardError):
+            core.update_card(tmp_db, cid, question="new")
+
+    def test_imported_reversed_deck_update_is_template_aware(
+        self, tmp_db: Path, basic_reversed_apkg: Path
+    ) -> None:
+        """Editing an imported reversed card's front updates that card, not
+        the other direction. Pins the fix for apkg-imported decks too."""
+        core.open_deck(tmp_db, basic_reversed_apkg, force=True)
+        cards = core.list_cards(tmp_db).cards
+        assert len(cards) == 2
+        # Fixture: forward Q="What is Python?", reverse Q="A programming language"
+        by_q = {c.question: c.card_id for c in cards}
+        forward = by_q["What is Python?"]
+        reverse = by_q["A programming language"]
+
+        core.update_card(tmp_db, reverse, question="a programming language (edited)")
+        assert core.get_card_detail(tmp_db, reverse).question == "a programming language (edited)"
+        assert core.get_card_detail(tmp_db, forward).answer == "a programming language (edited)"
+
+
+# --- Reversed card lifecycle tests ---
+
+
+class TestReversedLifecycle:
+    def test_delete_one_half_keeps_other(self, tmp_db: Path) -> None:
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        forward, reverse = r.card_ids
+        core.delete_card(tmp_db, forward)
+
+        # Reverse card still exists and renders correctly
+        d = core.get_card_detail(tmp_db, reverse)
+        assert d.question == "A"
+
+        # Forward is gone
+        with pytest.raises(core.CardNotFoundError):
+            core.get_card_detail(tmp_db, forward)
+
+    def test_delete_both_removes_note(self, tmp_db: Path) -> None:
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        for cid in r.card_ids:
+            core.delete_card(tmp_db, cid)
+        for cid in r.card_ids:
+            with pytest.raises(core.CardNotFoundError):
+                core.get_card_detail(tmp_db, cid)
+
+    def test_suspend_one_half_independent(self, tmp_db: Path) -> None:
+        """Suspending one card of the pair does not suspend the other."""
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        forward, reverse = r.card_ids
+        core.suspend_card(tmp_db, forward)
+        assert core.get_card_detail(tmp_db, forward).suspended is True
+        assert core.get_card_detail(tmp_db, reverse).suspended is False
+
+    def test_roundtrip_export_import(self, tmp_db: Path) -> None:
+        """Create reversed pair, save_deck, open_deck — both directions render."""
+        core.add_reversed_card(tmp_db, "Capital of France", "Paris", deck="geo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "out.apkg"
+            core.save_deck(tmp_db, out)
+
+            new_db = Path(tmpdir) / "new.db"
+            core.init_database(new_db)
+            core.open_deck(new_db, out, force=True)
+            cards = core.list_cards(new_db).cards
+            assert len(cards) == 2
+            questions = {c.question for c in cards}
+            assert questions == {"Capital of France", "Paris"}
+
+    def test_basic_then_reversed_creates_three_cards(self, tmp_db: Path) -> None:
+        """Documented limitation: no cross-model dedup; both notes coexist."""
+        core.add_card(tmp_db, "Q", "A", deck="d")
+        core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        cards = core.list_cards(tmp_db).cards
+        assert len(cards) == 3

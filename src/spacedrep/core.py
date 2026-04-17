@@ -14,7 +14,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from spacedrep import db, fsrs_engine
-from spacedrep.anki_schema import ANKI_SCHEMA, CLOZE_MODEL_ID, ColMeta, basic_guid, cloze_guid
+from spacedrep.anki_schema import (
+    ANKI_SCHEMA,
+    CLOZE_MODEL_ID,
+    ColMeta,
+    basic_guid,
+    cloze_guid,
+    reversed_guid,
+)
 from spacedrep.models import (
     BulkAddResult,
     BulkCardInput,
@@ -29,6 +36,7 @@ from spacedrep.models import (
     OpenResult,
     OptimizeResult,
     OverallStats,
+    ReversedAddResult,
     ReviewHistory,
     ReviewInput,
     ReviewPreview,
@@ -147,6 +155,17 @@ class NotAClozeNoteError(SpacedrepError):
             error_code="not_a_cloze_note",
             message=f"Card {card_id} is not part of a cloze note",
             suggestion="Use update_card for standalone cards",
+            exit_code=2,
+            card_id=card_id,
+        )
+
+
+class UpdateClozeCardError(SpacedrepError):
+    def __init__(self, card_id: int) -> None:
+        super().__init__(
+            error_code="update_cloze_card",
+            message=f"Card {card_id} is a cloze card; update_card is not supported for cloze.",
+            suggestion="Use update_cloze_note(card_id=..., text=...) instead.",
             exit_code=2,
             card_id=card_id,
         )
@@ -406,6 +425,18 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
                     conn, card_input.question, card_input.deck, card_input.tags, guid
                 )
                 created.extend(card_ids)
+            elif card_input.type == "reversed":
+                rev_guid = reversed_guid(card_input.question, card_input.deck)
+                _, rev_card_ids, _ = db.insert_reversed_note(
+                    conn,
+                    question=card_input.question,
+                    answer=card_input.answer,
+                    deck_name=card_input.deck,
+                    tags=card_input.tags,
+                    source="manual",
+                    guid=rev_guid,
+                )
+                created.extend(rev_card_ids)
             else:
                 guid = basic_guid(card_input.question, card_input.deck)
                 card_id, _ = db.insert_card(
@@ -420,6 +451,46 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
                 created.append(card_id)
         conn.commit()
         return BulkAddResult(created=created, count=len(created))
+
+
+def add_reversed_card(
+    db_path: Path,
+    question: str,
+    answer: str,
+    deck: str = "Default",
+    tags: str = "",
+    source: CardSource = "manual",
+) -> ReversedAddResult:
+    """Add a reversed card pair: one note, two cards (Q→A and A→Q).
+
+    Re-adding with the same (question, deck) updates the existing note in
+    place — both cards reflect the new answer and review history is
+    preserved.
+    """
+    if not question.strip():
+        raise EmptyFieldError("question")
+    if not answer.strip():
+        raise EmptyFieldError("answer")
+    if not deck.strip():
+        raise EmptyFieldError("deck")
+    with _open_db(db_path) as conn:
+        guid = reversed_guid(question, deck)
+        note_id, card_ids, _ = db.insert_reversed_note(
+            conn,
+            question=question,
+            answer=answer,
+            deck_name=deck,
+            tags=tags,
+            source=source,
+            guid=guid,
+        )
+        conn.commit()
+        return ReversedAddResult(
+            note_id=note_id,
+            card_ids=card_ids,
+            card_count=len(card_ids),
+            deck=deck,
+        )
 
 
 _CLOZE_PATTERN = re.compile(r"\{\{c(\d+)::(.+?)(?:::.*?)?\}\}", re.DOTALL)
@@ -735,9 +806,12 @@ def update_card(
                 raise EmptyFieldError("deck")
             deck_id = db.upsert_deck(conn, deck)
 
-        result = db.update_card(
-            conn, card_id, question=question, answer=answer, tags=tags, deck_id=deck_id
-        )
+        try:
+            result = db.update_card(
+                conn, card_id, question=question, answer=answer, tags=tags, deck_id=deck_id
+            )
+        except db.ClozeUpdateNotSupportedError as e:
+            raise UpdateClozeCardError(e.card_id) from e
         if not result:
             raise CardNotFoundError(card_id)
         conn.commit()

@@ -16,7 +16,11 @@ from typing import Any
 from fsrs import Card
 
 from spacedrep import fsrs_engine
-from spacedrep.anki_render import ModelInfo, render_card
+from spacedrep.anki_render import (
+    ModelInfo,
+    render_card,
+    resolve_card_qa_fields,
+)
 from spacedrep.anki_schema import (
     ANKI_SCHEMA,
     ColMeta,
@@ -39,6 +43,20 @@ from spacedrep.models import (
 )
 
 VALID_STATES = frozenset({"new", "learning", "review", "relearning"})
+
+
+class ClozeUpdateNotSupportedError(Exception):
+    """Raised by update_card when called on a cloze card.
+
+    Core translates this to UpdateClozeCardError for the CLI/MCP surface.
+    Cloze notes should be edited via update_cloze_note, which rewrites the
+    full Text field and regenerates cards per {{c1::...}} marker.
+    """
+
+    def __init__(self, card_id: int) -> None:
+        super().__init__(f"Cloze update not supported for card {card_id}")
+        self.card_id = card_id
+
 
 # Monotonic ID counter to avoid collisions within the same millisecond
 _next_id_counter = 0
@@ -345,6 +363,94 @@ def insert_cloze_cards(
     return card_ids
 
 
+def insert_reversed_note(
+    conn: sqlite3.Connection,
+    *,
+    question: str,
+    answer: str,
+    deck_name: str,
+    tags: str = "",
+    source: CardSource = "manual",
+    guid: str,
+) -> tuple[int, list[int], bool]:
+    """Insert or update a reversed note (1 note + 2 cards, ord=[0, 1]).
+
+    Dedup on notes.guid. On update, the note's Question/Answer fields are
+    rewritten (both rendered cards reflect the change), and the deck is
+    moved to match. Any missing ordinal among {0, 1} is filled in so the
+    pair is always intact.
+
+    Returns (note_id, [card_id_ord0, card_id_ord1], was_update).
+    """
+    now = int(time.time())
+
+    meta = load_col_meta(conn)
+    did = meta.ensure_deck(deck_name)
+    mid = meta.ensure_model("reversed")
+    save_col_meta(conn, meta)
+
+    note_flds = f"{question}\x1f{answer}"
+    sfld = question
+
+    existing = conn.execute("SELECT id FROM notes WHERE guid = ?", (guid,)).fetchone()
+    if existing:
+        note_id = int(existing["id"])
+        if tags:
+            conn.execute(
+                "UPDATE notes SET flds=?, sfld=?, tags=?, mod=?, usn=-1 WHERE id=?",
+                (note_flds, sfld, tags, now, note_id),
+            )
+        else:
+            # Empty tags = "not specified" — preserve existing.
+            conn.execute(
+                "UPDATE notes SET flds=?, sfld=?, mod=?, usn=-1 WHERE id=?",
+                (note_flds, sfld, now, note_id),
+            )
+        conn.execute(
+            "UPDATE cards SET did=?, mod=?, usn=-1 WHERE nid=?",
+            (did, now, note_id),
+        )
+
+        existing_cards = conn.execute(
+            "SELECT id, ord FROM cards WHERE nid = ? ORDER BY ord",
+            (note_id,),
+        ).fetchall()
+        by_ord: dict[int, int] = {int(r["ord"]): int(r["id"]) for r in existing_cards}
+        missing = [o for o in (0, 1) if o not in by_ord]
+        if missing:
+            new_ids = insert_cloze_cards(conn, note_id=note_id, did=did, ordinals=missing, now=now)
+            for ord_val, cid in zip(missing, new_ids, strict=True):
+                by_ord[ord_val] = cid
+                if source != "manual":
+                    conn.execute(
+                        "INSERT INTO spacedrep_card_extra (card_id, source) VALUES (?, ?)"
+                        " ON CONFLICT(card_id) DO UPDATE SET source = excluded.source",
+                        (cid, source),
+                    )
+
+        invalidate_model_cache(conn)
+        return (note_id, [by_ord[0], by_ord[1]], True)
+
+    # New note + 2 cards
+    note_id = next_id()
+    conn.execute(
+        "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)"
+        " VALUES (?, ?, ?, ?, -1, ?, ?, ?, 0, 0, '')",
+        (note_id, guid, mid, now, tags, note_flds, sfld),
+    )
+    card_ids = insert_cloze_cards(conn, note_id=note_id, did=did, ordinals=[0, 1], now=now)
+    if source != "manual":
+        for cid in card_ids:
+            conn.execute(
+                "INSERT INTO spacedrep_card_extra (card_id, source) VALUES (?, ?)"
+                " ON CONFLICT(card_id) DO UPDATE SET source = excluded.source",
+                (cid, source),
+            )
+
+    invalidate_model_cache(conn)
+    return (note_id, card_ids, False)
+
+
 # ---------------------------------------------------------------------------
 # Card read operations
 # ---------------------------------------------------------------------------
@@ -639,24 +745,47 @@ def update_card(
     tags: str | None = None,
     deck_id: int | None = None,
 ) -> bool:
-    """Update card fields. Returns False if not found."""
+    """Update card fields. Returns False if not found.
+
+    Field resolution is template-aware: for multi-template notes (reversed
+    pairs, custom imported note types) `question`/`answer` update the
+    fields that correspond to this specific card's front/back, not fixed
+    positions 0/1. For cloze cards this raises ClozeUpdateNotSupportedError —
+    callers should use update_cloze_note instead.
+    """
     now = int(time.time())
     row = conn.execute(
-        "SELECT c.nid, n.flds, n.mid FROM cards c JOIN notes n ON n.id = c.nid WHERE c.id = ?",
+        "SELECT c.nid, c.ord, n.flds, n.mid "
+        "FROM cards c JOIN notes n ON n.id = c.nid WHERE c.id = ?",
         (card_id,),
     ).fetchone()
     if row is None:
         return False
 
     nid = row["nid"]
+    ord_val = int(row["ord"])
+    mid_str = str(row["mid"])
     flds = str(row["flds"])
     parts = flds.split("\x1f")
 
     if question is not None or answer is not None:
-        if question is not None and len(parts) > 0:
-            parts[0] = question
-        if answer is not None and len(parts) > 1:
-            parts[1] = answer
+        models = _get_models(conn)
+        minfo = models.get(mid_str)
+        if minfo is not None and minfo.model_type == 1:
+            raise ClozeUpdateNotSupportedError(card_id)
+
+        if minfo is None:
+            qi, ai = 0, 1  # best-effort fallback for legacy rows
+        else:
+            qi_opt, ai_opt = resolve_card_qa_fields(minfo, ord_val)
+            # model_type != 1 path returns concrete ints, but satisfy the checker
+            qi = 0 if qi_opt is None else qi_opt
+            ai = 1 if ai_opt is None else ai_opt
+
+        if question is not None and qi < len(parts):
+            parts[qi] = question
+        if answer is not None and ai < len(parts):
+            parts[ai] = answer
         new_flds = "\x1f".join(parts)
         sfld = parts[0] if parts else ""
         conn.execute(

@@ -140,19 +140,44 @@ def add_card(
 
 @mcp.tool()
 @_handle_errors
+def add_reversed_card(
+    question: str,
+    answer: str,
+    deck: Annotated[str, Field(description="Deck name (created if new)")] = "Default",
+    tags: Annotated[str, Field(description="Space-separated tag names")] = "",
+) -> dict[str, Any]:
+    """Add a reversed card pair. Creates 2 cards from 1 shared note:
+    one Q→A and one A→Q. Use for vocabulary or any concept where you
+    want to be quizzed in both directions.
+
+    Re-adding with the same (question, deck) updates the existing note
+    in place and preserves review history on both cards. To edit just
+    one side, use update_card on the specific card_id — it is
+    template-aware and edits the correct card's front/back.
+
+    Returns note_id, card_ids (both directions), card_count (=2), deck."""
+    return _serialize(core.add_reversed_card(_db_path(), question, answer, deck=deck, tags=tags))
+
+
+@mcp.tool()
+@_handle_errors
 def add_cards_bulk(
     cards_json: Annotated[
         str,
         Field(
             description="JSON array of card objects. "
             'Basic: {"question":"...","answer":"...","deck":"...","tags":"..."}. '
-            'Cloze: {"question":"{{c1::...}}","type":"cloze","deck":"...","tags":"..."}.'
+            'Cloze: {"question":"{{c1::...}}","type":"cloze","deck":"...","tags":"..."}. '
+            'Reversed: {"question":"...","answer":"...","type":"reversed",'
+            '"deck":"...","tags":"..."} — creates 2 cards (Q→A and A→Q).'
         ),
     ],
 ) -> dict[str, Any]:
     """Add multiple flashcards in one transaction. Each object has: question,
-    answer, deck (optional), tags (optional), type (optional: 'basic' or 'cloze').
-    When type='cloze', question contains cloze text and answer is ignored."""
+    answer, deck (optional), tags (optional), type (optional: 'basic',
+    'cloze', or 'reversed'). When type='cloze', question contains cloze
+    text and answer is ignored. When type='reversed', two cards are
+    created from one shared note (Q→A and A→Q)."""
     from pydantic import TypeAdapter, ValidationError
 
     try:
@@ -378,7 +403,16 @@ def update_card(
     deck: Annotated[str, Field(description="Move card to this deck")] = "",
 ) -> dict[str, Any]:
     """Update a flashcard's question, answer, tags, or deck. Only non-empty
-    fields are changed. Provide at least one field to update."""
+    fields are changed. Provide at least one field to update.
+
+    Field resolution is template-aware. For a reversed card, `question`
+    updates the field that renders as *that* card's front (ord=0 writes
+    the Question field; ord=1 writes the Answer field), so the edit
+    shows up where you expect. Both cards of a reversed pair share one
+    note, so edits propagate to both in the correct positions.
+
+    Cloze cards are rejected with an `update_cloze_card` error — use
+    update_cloze_note to edit cloze text."""
     q = _or_none(question)
     a = _or_none(answer)
     t = _or_none(tags)

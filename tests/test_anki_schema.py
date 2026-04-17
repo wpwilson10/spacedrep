@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
+import pytest
 from fsrs import Card, State
 
 from spacedrep.anki_schema import (
@@ -17,6 +18,7 @@ from spacedrep.anki_schema import (
     datetime_to_due,
     due_to_datetime,
     fsrs_card_to_anki_fields,
+    reversed_guid,
 )
 
 # ---------------------------------------------------------------------------
@@ -94,10 +96,13 @@ def test_col_meta_default_produces_valid_row() -> None:
     conn.close()
 
 
-def test_col_meta_default_has_both_models() -> None:
+def test_col_meta_default_has_all_models() -> None:
+    from spacedrep.anki_schema import BASIC_REVERSED_MODEL_ID
+
     meta = ColMeta.default()
     assert str(BASIC_MODEL_ID) in meta.models
     assert str(CLOZE_MODEL_ID) in meta.models
+    assert str(BASIC_REVERSED_MODEL_ID) in meta.models
 
 
 def test_col_meta_default_has_default_deck() -> None:
@@ -166,6 +171,30 @@ def test_col_meta_ensure_model_adds_if_missing() -> None:
     mid = meta.ensure_model("cloze")
     assert mid == CLOZE_MODEL_ID
     assert str(CLOZE_MODEL_ID) in meta.models
+
+
+def test_col_meta_ensure_model_reversed() -> None:
+    from spacedrep.anki_schema import BASIC_REVERSED_MODEL_ID
+
+    meta = ColMeta.default()
+    mid = meta.ensure_model("reversed")
+    assert mid == BASIC_REVERSED_MODEL_ID
+
+
+def test_col_meta_ensure_model_reversed_adds_if_missing() -> None:
+    from spacedrep.anki_schema import BASIC_REVERSED_MODEL_ID
+
+    meta = ColMeta.default()
+    del meta.models[str(BASIC_REVERSED_MODEL_ID)]
+    mid = meta.ensure_model("reversed")
+    assert mid == BASIC_REVERSED_MODEL_ID
+    assert str(BASIC_REVERSED_MODEL_ID) in meta.models
+
+
+def test_col_meta_ensure_model_unknown_raises() -> None:
+    meta = ColMeta.default()
+    with pytest.raises(ValueError, match="Unknown model_type"):
+        meta.ensure_model("bogus")
 
 
 # ---------------------------------------------------------------------------
@@ -415,3 +444,20 @@ class TestGuidGeneration:
     def test_guids_are_hex(self) -> None:
         g = basic_guid("test", "deck")
         assert all(c in "0123456789abcdef" for c in g)
+
+    def test_reversed_guid_deterministic(self) -> None:
+        g1 = reversed_guid("What is X?", "Default")
+        g2 = reversed_guid("What is X?", "Default")
+        assert g1 == g2
+        assert len(g1) == 10
+
+    def test_reversed_guid_namespaced_vs_basic(self) -> None:
+        """reversed_guid must not collide with basic_guid on same (Q, deck)."""
+        assert reversed_guid("Q", "d") != basic_guid("Q", "d")
+
+    def test_reversed_guid_ignores_answer(self) -> None:
+        """Dedup is on (question, deck) only — updating the answer via
+        re-add should hit the same note, preserving review history."""
+        g1 = reversed_guid("Q", "d")
+        g2 = reversed_guid("Q", "d")
+        assert g1 == g2

@@ -20,6 +20,7 @@ from spacedrep.mcp_server import (
     add_card,
     add_cards_bulk,
     add_cloze_note,
+    add_reversed_card,
     bury_card,
     delete_card,
     export_deck,
@@ -505,7 +506,7 @@ class TestClozeWhitespaceTags:
 # ---------------------------------------------------------------------------
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean"}
-EXPECTED_TOOL_COUNT = 26
+EXPECTED_TOOL_COUNT = 27
 
 
 def _get_tools() -> dict[str, object]:
@@ -652,3 +653,52 @@ class TestSubmitReviewSuspended:
         unsuspend_card(card_id)
         result = submit_review(card_id, rating=3)
         assert result["rating"] == "good"
+
+
+class TestAddReversedCard:
+    def test_creates_two_cards(self, tmp_db: Path) -> None:
+        result = add_reversed_card("Capital of France", "Paris", deck="geo")
+        assert result["card_count"] == 2
+        assert len(result["card_ids"]) == 2
+        assert result["deck"] == "geo"
+        # Verify both directions render
+        d0 = core.get_card_detail(tmp_db, result["card_ids"][0])
+        d1 = core.get_card_detail(tmp_db, result["card_ids"][1])
+        qs = {d0.question, d1.question}
+        assert qs == {"Capital of France", "Paris"}
+
+    def test_dedup_updates_in_place(self, tmp_db: Path) -> None:
+        r1 = add_reversed_card("Q", "A1", deck="d")
+        r2 = add_reversed_card("Q", "A2", deck="d")
+        assert r1["card_ids"] == r2["card_ids"]
+
+
+class TestAddCardsBulkReversed:
+    def test_bulk_with_reversed_type(self, tmp_db: Path) -> None:
+        cards_json = json.dumps(
+            [
+                {"question": "Basic Q", "answer": "Basic A", "deck": "d"},
+                {
+                    "question": "Rev Q",
+                    "answer": "Rev A",
+                    "type": "reversed",
+                    "deck": "d",
+                },
+            ]
+        )
+        result = add_cards_bulk(cards_json)
+        # 1 basic + 2 reversed = 3
+        assert result["count"] == 3
+
+    def test_bulk_reversed_missing_answer_rejected(self, tmp_db: Path) -> None:
+        cards_json = json.dumps([{"question": "Q", "type": "reversed", "deck": "d"}])
+        with pytest.raises(ToolError):
+            add_cards_bulk(cards_json)
+
+
+class TestUpdateCardClozeRejected:
+    def test_update_card_on_cloze_raises(self, tmp_db: Path) -> None:
+        result = add_cloze_note("{{c1::Ottawa}} is a city", deck="d")
+        cid = result["card_ids"][0]
+        with pytest.raises(ToolError, match="update_cloze_card"):
+            update_card(cid, question="new")

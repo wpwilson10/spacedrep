@@ -304,6 +304,12 @@ def update_card(
 ) -> None:
     """Update a card's question, answer, tags, or deck.
 
+    Field resolution is template-aware: `--question` edits whichever
+    note field renders as *this* card's front. For a reversed pair
+    both cards share one note, so edits also update the other card's
+    corresponding side. Cloze cards are rejected — use
+    `card update-cloze` instead.
+
     Example:
         spacedrep card update 1 --question "Updated question" --deck DSA
     """
@@ -410,6 +416,37 @@ def unbury(
         result = core.unbury_card(db, card_id)
         if quiet:
             output_quiet(result["card_id"])
+        else:
+            output_json(result)
+    except core.SpacedrepError as e:
+        output_error(e)
+        raise typer.Exit(code=e.exit_code) from None
+
+
+@card_app.command("add-reversed")
+def add_reversed(
+    question: str = typer.Argument(..., help="The card question"),
+    answer: str = typer.Argument(..., help="The card answer"),
+    deck: str = typer.Option("Default", help="Deck name"),
+    tags: str = typer.Option("", help="Space-separated tags"),
+    quiet: bool = QUIET_OPT,
+    db: Path = DB_DEFAULT,
+) -> None:
+    """Add a reversed card pair: 2 cards from 1 note (Q→A and A→Q).
+
+    Re-running with the same (question, deck) updates the existing note
+    in place — both cards reflect the new answer, review history is
+    preserved. To edit the text later, either re-run add-reversed or use
+    `card update` (template-aware: edits the side of the specific card
+    you name).
+
+    Example:
+        spacedrep card add-reversed "Capital of France" "Paris" --deck geo
+    """
+    try:
+        result = core.add_reversed_card(db, question, answer, deck=deck, tags=tags)
+        if quiet:
+            output_quiet(result.card_ids)
         else:
             output_json(result)
     except core.SpacedrepError as e:

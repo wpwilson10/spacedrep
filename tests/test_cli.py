@@ -417,7 +417,7 @@ class TestDeck:
             assert isinstance(data, dict)
             assert "decks" in data
             assert "count" in data
-            names: list[str] = [d["name"] for d in data["decks"]]
+            names: list[str] = [d["name"] for d in data["decks"]]  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
             assert "Default" in names
 
     def test_export(self) -> None:
@@ -713,3 +713,55 @@ class TestDryRun:
             assert result.returncode == 3
             data = json.loads(result.stderr)
             assert data["error"] == "card_not_found"
+
+
+class TestCardAddReversed:
+    def test_creates_two_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+
+            result = _run(
+                ["card", "add-reversed", "Capital of France", "Paris", "--deck", "geo"],
+                db_path,
+            )
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["card_count"] == 2
+            assert len(data["card_ids"]) == 2
+            assert data["deck"] == "geo"
+
+            # Both directions should be listable
+            result = _run(["card", "list", "--deck", "geo"], db_path)
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            assert data["total"] == 2
+            questions = {c["question"] for c in data["cards"]}
+            assert questions == {"Capital of France", "Paris"}
+
+    def test_quiet_emits_card_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            result = _run(
+                ["card", "add-reversed", "Q", "A", "--deck", "d", "--quiet"],
+                db_path,
+            )
+            assert result.returncode == 0
+            # output_quiet for a list: one id per line
+            ids = [int(line) for line in result.stdout.strip().splitlines() if line]
+            assert len(ids) == 2
+            assert ids[0] != ids[1]
+
+    def test_dedup_update_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            _init_db(db_path)
+            r1 = _run(["card", "add-reversed", "Q", "A1", "--deck", "d"], db_path)
+            r2 = _run(["card", "add-reversed", "Q", "A2", "--deck", "d"], db_path)
+            d1 = json.loads(r1.stdout)
+            d2 = json.loads(r2.stdout)
+            assert d1["card_ids"] == d2["card_ids"]
+
+            list_result = _run(["card", "list", "--deck", "d"], db_path)
+            assert json.loads(list_result.stdout)["total"] == 2

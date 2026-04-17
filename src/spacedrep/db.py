@@ -58,6 +58,16 @@ class ClozeUpdateNotSupportedError(Exception):
         self.card_id = card_id
 
 
+class ModernSchemaError(Exception):
+    """Raised when a DB uses Anki 2.1.49+ split-table schema.
+
+    Core translates this to UnsupportedCollectionFormatError for the
+    CLI/MCP surface. Data in those DBs lives in notetypes/templates/
+    fields/deck_config/config/tags tables; the legacy col.* JSON
+    columns are empty strings, which our reader can't interpret.
+    """
+
+
 # Monotonic ID counter to avoid collisions within the same millisecond
 _next_id_counter = 0
 
@@ -157,6 +167,38 @@ def _get_crt(conn: sqlite3.Connection) -> int:
 
 
 _model_cache: dict[int, dict[str, ModelInfo]] = {}
+
+
+def is_modern_anki_schema(conn: sqlite3.Connection) -> bool:
+    """True iff col.models is empty AND the notetypes table has rows.
+
+    Signal that this DB uses Anki 2.1.49+ split-table layout: note-type
+    metadata lives in notetypes/templates/fields instead of col.models.
+    spacedrep reads only the legacy col.* JSON columns today, so these
+    DBs must be rejected at the boundary with a clear error.
+
+    Returns False for:
+        - brand-new SQLite files with no col table yet (pre-init_db),
+        - fresh DBs where col row exists with populated JSON,
+        - fresh DBs with no col row yet,
+        - legacy-shaped DBs that happen to have empty col.models but no
+          notetypes table (don't false-positive).
+    """
+    has_col = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='col'"
+    ).fetchone()
+    if has_col is None:
+        return False
+    row = conn.execute("SELECT models FROM col WHERE id = 1").fetchone()
+    if row is None or row["models"]:
+        return False
+    has_nt = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notetypes'"
+    ).fetchone()
+    if has_nt is None:
+        return False
+    nt_count = conn.execute("SELECT COUNT(*) AS n FROM notetypes").fetchone()
+    return bool(nt_count and int(nt_count["n"]) > 0)
 
 
 def _get_models(conn: sqlite3.Connection) -> dict[str, ModelInfo]:
@@ -682,7 +724,6 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
         """
         SELECT c.id AS card_id, n.flds, n.mid, c.ord, n.tags,
                c.type, c.queue, c.due, c.ivl, c.factor, c.reps, c.lapses, c.data, c.did,
-               c.mod AS card_mod,
                sce.buried_until, sce.source,
                (SELECT COUNT(*) FROM revlog rl WHERE rl.cid = c.id) AS review_count
         FROM cards c
@@ -705,8 +746,8 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
     if lrt is not None:
         last_review_str = datetime.fromtimestamp(lrt, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
 
-    # created_at from card mod (first mod is creation time, approximation)
-    created_ts = row["card_mod"]
+    # cards.id is a ms epoch assigned at insert (see next_id()); immutable.
+    created_ts = int(row["card_id"]) / 1000
     created_at = datetime.fromtimestamp(created_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
 
     return CardDetail(

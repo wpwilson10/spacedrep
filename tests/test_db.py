@@ -1,5 +1,6 @@
 """Tests for db module (Anki-native schema)."""
 
+import sqlite3
 from pathlib import Path
 
 from spacedrep import db
@@ -973,4 +974,94 @@ def test_due_after_includes_new_cards(tmp_db: Path) -> None:
     result = db.list_cards(conn, due_after="2020-01-01T00:00:00")
     assert result.total == 1
 
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Modern Anki schema detection
+# ---------------------------------------------------------------------------
+
+
+def _fabricate_modern_schema(db_path: Path) -> None:
+    """Create a DB that mimics Anki 2.1.49+: legacy col row with empty
+    JSON columns plus a populated notetypes table."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE col (id INTEGER PRIMARY KEY, crt INTEGER, mod INTEGER,"
+        " scm INTEGER, ver INTEGER, dty INTEGER, usn INTEGER, ls INTEGER,"
+        " conf TEXT, models TEXT, decks TEXT, dconf TEXT, tags TEXT)"
+    )
+    conn.execute("INSERT INTO col VALUES (1, 0, 0, 0, 18, 0, 0, 0, '', '', '', '', '')")
+    conn.execute("CREATE TABLE notetypes (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO notetypes VALUES (1, 'Basic')")
+    conn.commit()
+    conn.close()
+
+
+def test_is_modern_anki_schema_false_on_fresh_db(tmp_db: Path) -> None:
+    """Fresh DB initialized via db.init_db is the legacy layout: False."""
+    conn = db.get_connection(tmp_db)
+    conn.row_factory = sqlite3.Row
+    assert db.is_modern_anki_schema(conn) is False
+    conn.close()
+
+
+def test_is_modern_anki_schema_true_on_hybrid_db(tmp_path: Path) -> None:
+    """Empty col.models + populated notetypes table → True."""
+    db_path = tmp_path / "hybrid.anki21"
+    _fabricate_modern_schema(db_path)
+    conn = db.get_connection(db_path)
+    assert db.is_modern_anki_schema(conn) is True
+    conn.close()
+
+
+def test_is_modern_anki_schema_false_without_notetypes(tmp_path: Path) -> None:
+    """Empty col.models but no notetypes table is NOT modern — don't false-positive."""
+    db_path = tmp_path / "weird.anki21"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE col (id INTEGER PRIMARY KEY, crt INTEGER, mod INTEGER,"
+        " scm INTEGER, ver INTEGER, dty INTEGER, usn INTEGER, ls INTEGER,"
+        " conf TEXT, models TEXT, decks TEXT, dconf TEXT, tags TEXT)"
+    )
+    conn.execute("INSERT INTO col VALUES (1, 0, 0, 0, 18, 0, 0, 0, '', '', '', '', '')")
+    conn.commit()
+    conn.close()
+    conn = db.get_connection(db_path)
+    assert db.is_modern_anki_schema(conn) is False
+    conn.close()
+
+
+def test_is_modern_anki_schema_false_on_empty_notetypes(tmp_path: Path) -> None:
+    """notetypes table exists but is empty → legacy shape, return False."""
+    db_path = tmp_path / "empty_nt.anki21"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE col (id INTEGER PRIMARY KEY, crt INTEGER, mod INTEGER,"
+        " scm INTEGER, ver INTEGER, dty INTEGER, usn INTEGER, ls INTEGER,"
+        " conf TEXT, models TEXT, decks TEXT, dconf TEXT, tags TEXT)"
+    )
+    conn.execute("INSERT INTO col VALUES (1, 0, 0, 0, 18, 0, 0, 0, '', '', '', '', '')")
+    conn.execute("CREATE TABLE notetypes (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.commit()
+    conn.close()
+    conn = db.get_connection(db_path)
+    assert db.is_modern_anki_schema(conn) is False
+    conn.close()
+
+
+def test_is_modern_anki_schema_false_when_no_col_row(tmp_path: Path) -> None:
+    """Empty SQLite file (no col row yet) → False, not True."""
+    db_path = tmp_path / "empty.anki21"
+    # Just create the col table but no row
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE col (id INTEGER PRIMARY KEY, crt INTEGER, mod INTEGER,"
+        " scm INTEGER, ver INTEGER, dty INTEGER, usn INTEGER, ls INTEGER,"
+        " conf TEXT, models TEXT, decks TEXT, dconf TEXT, tags TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    conn = db.get_connection(db_path)
+    assert db.is_modern_anki_schema(conn) is False
     conn.close()

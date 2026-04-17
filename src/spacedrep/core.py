@@ -171,6 +171,26 @@ class UpdateClozeCardError(SpacedrepError):
         )
 
 
+class UnsupportedCollectionFormatError(SpacedrepError):
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(
+            error_code="unsupported_collection_format",
+            message=(
+                f"{db_path} uses the Anki 2.1.49+ split-table schema "
+                "(notetypes/templates/fields). spacedrep currently reads "
+                "the legacy col.models JSON layout only."
+            ),
+            suggestion=(
+                "Re-export from Anki Desktop as an .apkg with 'Support "
+                "older Anki versions' checked (File \u2192 Export), then "
+                "`spacedrep deck import` it; or point SPACEDREP_DB / --db "
+                "at a fresh file initialized with `spacedrep db init`."
+            ),
+            exit_code=2,
+            db_path=str(db_path),
+        )
+
+
 class OptimizerNotInstalledError(SpacedrepError):
     def __init__(self) -> None:
         super().__init__(
@@ -274,6 +294,8 @@ def _open_db(db_path: Path, *, require_exists: bool = True) -> Iterator[sqlite3.
         raise DatabaseNotFoundError(db_path)
     conn = db.get_connection(db_path)
     try:
+        if db.is_modern_anki_schema(conn):
+            raise UnsupportedCollectionFormatError(db_path)
         _ensure_params_loaded(conn)
         yield conn
     finally:
@@ -450,7 +472,11 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
                 )
                 created.append(card_id)
         conn.commit()
-        return BulkAddResult(created=created, count=len(created))
+        # Preserve order, drop duplicate ids from re-adds (dedup hits).
+        # Semantics: `created` is the set of card IDs that exist as a
+        # result of this call; `count` is the size of that set.
+        deduped: list[int] = list(dict.fromkeys(created))
+        return BulkAddResult(created=deduped, count=len(deduped))
 
 
 def add_reversed_card(
@@ -977,6 +1003,8 @@ def open_deck(db_path: Path, apkg_path: Path, *, force: bool = False) -> OpenRes
     conn = db.get_connection(db_path)
     try:
         conn.executescript(ANKI_SCHEMA)
+        if db.is_modern_anki_schema(conn):
+            raise UnsupportedCollectionFormatError(db_path)
         # Ensure col row exists (it should from the .apkg)
         col_exists = conn.execute("SELECT id FROM col WHERE id = 1").fetchone()
         if col_exists is None:

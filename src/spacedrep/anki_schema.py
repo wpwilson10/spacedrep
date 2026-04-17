@@ -19,6 +19,19 @@ from fsrs import Card, State
 # the schema is defined by Anki, not by us.
 AnkiJson = dict[str, Any]
 
+
+def _json_or_empty(value: Any, default: Any) -> Any:
+    """Parse JSON if value is truthy, else return default.
+
+    Anki 2.1.49+ leaves col.* JSON columns as empty strings (data lives
+    in split tables). Treat empty as default so ColMeta.from_row stays
+    safe; the higher layer raises a clear error when appropriate.
+    """
+    if not value:
+        return default
+    return json.loads(str(value))
+
+
 # ---------------------------------------------------------------------------
 # Model and deck ID constants (stable hashes matching apkg_writer.py)
 # ---------------------------------------------------------------------------
@@ -397,17 +410,24 @@ class ColMeta:
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "ColMeta":
-        """Parse a col table row into ColMeta."""
+        """Parse a col table row into ColMeta.
+
+        Empty JSON strings are tolerated and map to empty dicts — some
+        Anki 2.1.49+ DBs leave the legacy col.* JSON columns empty and
+        move the data to separate tables. Detection of that case and
+        raising a clear error is done at a higher layer (db._is_modern_anki_schema
+        + core._open_db); this method just doesn't crash.
+        """
         return cls(
             crt=int(row["crt"]),
             mod=int(row["mod"]),
             scm=int(row["scm"]),
             ver=int(row["ver"]),
-            conf=json.loads(str(row["conf"])),
-            models=json.loads(str(row["models"])),
-            decks=json.loads(str(row["decks"])),
-            dconf=json.loads(str(row["dconf"])),
-            tags=json.loads(str(row["tags"])) if row.get("tags") else {},
+            conf=_json_or_empty(row.get("conf"), {}),
+            models=_json_or_empty(row.get("models"), {}),
+            decks=_json_or_empty(row.get("decks"), {}),
+            dconf=_json_or_empty(row.get("dconf"), {}),
+            tags=_json_or_empty(row.get("tags"), {}),
         )
 
     def to_col_row(self) -> dict[str, Any]:

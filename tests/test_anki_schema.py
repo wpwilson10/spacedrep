@@ -461,3 +461,41 @@ class TestGuidGeneration:
         g1 = reversed_guid("Q", "d")
         g2 = reversed_guid("Q", "d")
         assert g1 == g2
+
+
+class TestColMetaFromRowTolerance:
+    """ColMeta.from_row must not crash on empty JSON columns.
+
+    Anki 2.1.49+ leaves col.{conf,models,decks,dconf,tags} empty; the
+    "this is a modern-schema DB" signal is raised at the db/_open_db
+    layer, not here. from_row just needs to return empty collections
+    gracefully.
+    """
+
+    def _empty_row(self) -> dict[str, str | int]:
+        return {
+            "crt": 0,
+            "mod": 0,
+            "scm": 0,
+            "ver": 18,
+            "conf": "",
+            "models": "",
+            "decks": "",
+            "dconf": "",
+            "tags": "",
+        }
+
+    def test_all_empty_strings(self) -> None:
+        meta = ColMeta.from_row(self._empty_row())
+        assert meta.conf == {}
+        assert meta.models == {}
+        assert meta.decks == {}
+        assert meta.dconf == {}
+        assert meta.tags == {}
+
+    def test_mixed_empty_and_populated(self) -> None:
+        row = self._empty_row()
+        row["models"] = json.dumps({"1": {"id": 1, "name": "x"}})
+        meta = ColMeta.from_row(row)
+        assert meta.models == {"1": {"id": 1, "name": "x"}}
+        assert meta.decks == {}

@@ -1,12 +1,38 @@
 """Tests for core business logic."""
 
+import sqlite3
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from spacedrep import core
 from spacedrep.models import ReviewInput
+
+
+def _write_modern_schema_db(path: Path) -> None:
+    """Fabricate a SQLite file shaped like Anki 2.1.49+ (empty col JSON
+    columns + populated notetypes table)."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE col (id INTEGER PRIMARY KEY, crt INTEGER, mod INTEGER,"
+        " scm INTEGER, ver INTEGER, dty INTEGER, usn INTEGER, ls INTEGER,"
+        " conf TEXT, models TEXT, decks TEXT, dconf TEXT, tags TEXT)"
+    )
+    conn.execute("INSERT INTO col VALUES (1, 0, 0, 0, 18, 0, 0, 0, '', '', '', '', '')")
+    conn.execute("CREATE TABLE notetypes (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO notetypes VALUES (1, 'Basic')")
+    conn.commit()
+    conn.close()
+
+
+def _write_modern_schema_apkg(apkg: Path, inner_db: Path) -> None:
+    """Zip a modern-schema SQLite file into an .apkg."""
+    _write_modern_schema_db(inner_db)
+    with zipfile.ZipFile(apkg, "w") as zf:
+        zf.write(inner_db, "collection.anki21")
+        zf.writestr("media", "{}")
 
 
 def test_init_database() -> None:
@@ -67,7 +93,13 @@ def test_add_card_dedup_different_deck(tmp_db: Path) -> None:
 
 
 def test_add_cards_bulk_dedup(tmp_db: Path) -> None:
-    """Bulk add with duplicate entries deduplicates."""
+    """Bulk add with duplicate entries dedupes returned ids and count.
+
+    Contract: `count == len(created) == number of distinct cards that
+    exist as a result of this call`. A re-add of (question, deck)
+    updates the existing card in place, so it contributes a single id
+    to `created`, not one id per input row.
+    """
     from spacedrep.models import BulkCardInput
 
     cards = [
@@ -76,9 +108,13 @@ def test_add_cards_bulk_dedup(tmp_db: Path) -> None:
         BulkCardInput(question="Q2", answer="A2", deck="Test"),
     ]
     result = core.add_cards_bulk(tmp_db, cards)
-    assert result.count == 3  # 3 operations
-    assert result.created[0] == result.created[1]  # same card_id for duplicates
-    assert result.created[0] != result.created[2]  # different card
+    assert result.count == 2
+    assert len(result.created) == 2
+    assert result.created[0] != result.created[1]
+    # The re-add updated the first card in place.
+    d = core.get_card_detail(tmp_db, result.created[0])
+    assert d is not None
+    assert d.answer == "A1-updated"
 
 
 def test_submit_review(populated_db: Path) -> None:
@@ -1152,6 +1188,24 @@ class TestAddCardsBulkReversed:
 
             BulkCardInput(question="Q", answer="", type="reversed", deck="d")
 
+    def test_bulk_reversed_dedup_in_same_batch(self, tmp_db: Path) -> None:
+        """Two reversed entries with same (question, deck) within one bulk
+        call hit the dedup path. Expect: one pair of cards (count=2), no
+        duplicate ids in `created`, and only 2 cards in the DB after.
+        """
+        from spacedrep.models import BulkCardInput
+
+        cards = [
+            BulkCardInput(question="DupQ", answer="A1", type="reversed", deck="bulk"),
+            BulkCardInput(question="DupQ", answer="A2", type="reversed", deck="bulk"),
+        ]
+        result = core.add_cards_bulk(tmp_db, cards)
+        assert result.count == 2
+        assert len(result.created) == 2
+        assert result.created[0] != result.created[1]
+        listed = core.list_cards(tmp_db, deck="bulk")
+        assert listed.total == 2
+
 
 # --- Template-aware update_card tests ---
 
@@ -1273,3 +1327,74 @@ class TestReversedLifecycle:
         core.add_reversed_card(tmp_db, "Q", "A", deck="d")
         cards = core.list_cards(tmp_db).cards
         assert len(cards) == 3
+
+
+# ---------------------------------------------------------------------------
+# Modern-schema rejection tests
+# ---------------------------------------------------------------------------
+
+
+class TestUnsupportedCollectionFormat:
+    def test_list_cards_raises_on_modern_schema(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "modern.anki21"
+        _write_modern_schema_db(db_path)
+        with pytest.raises(core.UnsupportedCollectionFormatError) as excinfo:
+            core.list_cards(db_path)
+        err = excinfo.value
+        assert err.error_code == "unsupported_collection_format"
+        assert "notetypes" in err.message
+
+    def test_get_card_raises_on_modern_schema(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "modern.anki21"
+        _write_modern_schema_db(db_path)
+        with pytest.raises(core.UnsupportedCollectionFormatError):
+            core.get_card_detail(db_path, 1)
+
+    def test_init_database_raises_on_modern_schema(self, tmp_path: Path) -> None:
+        """init_database must also reject so users don't get a false "ok"."""
+        db_path = tmp_path / "modern.anki21"
+        _write_modern_schema_db(db_path)
+        with pytest.raises(core.UnsupportedCollectionFormatError):
+            core.init_database(db_path)
+
+    def test_open_deck_rejects_modern_schema_apkg(self, tmp_path: Path) -> None:
+        apkg = tmp_path / "modern.apkg"
+        inner = tmp_path / "inner.anki21"
+        _write_modern_schema_apkg(apkg, inner)
+        target = tmp_path / "target.anki21"
+        core.init_database(target)
+        with pytest.raises(core.UnsupportedCollectionFormatError):
+            core.open_deck(target, apkg, force=True)
+
+    def test_fresh_db_is_not_flagged_as_modern(self, tmp_db: Path) -> None:
+        """Sanity: the normal init path must not trip the probe."""
+        # Using any core operation on tmp_db should succeed.
+        result = core.list_cards(tmp_db)
+        assert result.total == 0
+
+
+class TestCreatedAtStability:
+    def test_created_at_does_not_shift_on_update(self, tmp_db: Path) -> None:
+        """created_at is derived from cards.id (ms epoch at insert), not
+        cards.mod (updated on every edit). An update must not move it.
+        """
+        r = core.add_card(tmp_db, "q", "a", deck="d")
+        cid = int(r["card_id"])
+        before = core.get_card_detail(tmp_db, cid)
+        assert before is not None
+        core.update_card(tmp_db, cid, question="q-edited")
+        after = core.get_card_detail(tmp_db, cid)
+        assert after is not None
+        assert after.created_at == before.created_at
+
+    def test_created_at_stable_across_reversed_re_add(self, tmp_db: Path) -> None:
+        """Reversed dedup path updates cards.mod on both cards; created_at
+        on both must stay pinned to the original insert."""
+        r = core.add_reversed_card(tmp_db, "Q", "A1", deck="d")
+        before = [core.get_card_detail(tmp_db, cid) for cid in r.card_ids]
+        assert all(d is not None for d in before)
+        core.add_reversed_card(tmp_db, "Q", "A2", deck="d")
+        after = [core.get_card_detail(tmp_db, cid) for cid in r.card_ids]
+        for b, a in zip(before, after, strict=True):
+            assert b is not None and a is not None
+            assert a.created_at == b.created_at

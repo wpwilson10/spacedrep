@@ -32,30 +32,21 @@ Optional extras: `spacedrep[mcp]` for the MCP server, `spacedrep[optimizer]` for
 
 - **FSRS scheduling** — same algorithm as Anki 23.10+, with parameter optimization from your review history
 - **Cloze deletions** — `{{c1::answer}}` syntax, auto-expands into multiple cards
+- **Reversed cards** — one note becomes two cards (Q→A and A→Q); edits are template-aware and re-adds dedupe on (question, deck)
 - **Anki-native storage** — single SQLite file using Anki's schema for full round-trip compatibility
 - **Rich filtering** — by deck, tags, state, date ranges, FSRS properties, and more
 - **Agent-friendly** — duplicate detection, leech detection, review preview, bury/unbury, review history
 
 ## MCP Server
 
-Connect spacedrep to an AI agent as an MCP tool server:
+Add to Claude Desktop (`claude_desktop_config.json`):
 
-```bash
-pip install spacedrep[mcp]
-```
-
-**Claude Code:**
-```bash
-claude mcp add spacedrep -e SPACEDREP_DB=/path/to/collection.anki21 -- uv run --directory /path/to/spacedrep spacedrep-mcp
-```
-
-**Claude Desktop** (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
     "spacedrep": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/spacedrep", "spacedrep-mcp"],
+      "command": "uvx",
+      "args": ["--from", "spacedrep[mcp]", "spacedrep-mcp"],
       "env": {
         "SPACEDREP_DB": "/path/to/collection.anki21"
       }
@@ -64,8 +55,6 @@ claude mcp add spacedrep -e SPACEDREP_DB=/path/to/collection.anki21 -- uv run --
 }
 ```
 
-Set `SPACEDREP_DB` to configure the database path for the MCP server (default: `./collection.anki21`). The CLI uses `--db` instead.
-
 ## CLI Quick Start
 
 ```bash
@@ -73,6 +62,7 @@ spacedrep db init                            # create the database
 spacedrep deck import ~/Downloads/deck.apkg  # or import an existing Anki deck
 spacedrep card add "What is CAP theorem?" "Pick 2 of 3: consistency, availability, partition tolerance" --deck AWS
 spacedrep card add-cloze "{{c1::Ottawa}} is the capital of {{c2::Canada}}" --deck Geo
+spacedrep card add-reversed "Capital of France" "Paris" --deck Geo  # creates 2 cards: Q→A and A→Q
 spacedrep card next                          # get the next due card
 spacedrep review submit <card_id> good       # again | hard | good | easy
 ```

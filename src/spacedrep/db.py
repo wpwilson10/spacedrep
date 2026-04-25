@@ -970,6 +970,28 @@ def bury_card(conn: sqlite3.Connection, card_id: int, until: str) -> bool:
     return True
 
 
+def bury_siblings(conn: sqlite3.Connection, card_id: int, until: str) -> list[int]:
+    """Bury all sibling cards (sharing the same note) until a datetime. Returns the
+    list of buried card IDs. Empty list if the card has no siblings or doesn't exist."""
+    row = conn.execute("SELECT nid FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row is None:
+        return []
+    nid = row["nid"]
+    sibling_rows = conn.execute(
+        "SELECT id FROM cards WHERE nid = ? AND id != ?", (nid, card_id)
+    ).fetchall()
+    buried: list[int] = []
+    for sib in sibling_rows:
+        sib_id = int(sib["id"])
+        conn.execute(
+            "INSERT INTO spacedrep_card_extra (card_id, buried_until) VALUES (?, ?)"
+            " ON CONFLICT(card_id) DO UPDATE SET buried_until = excluded.buried_until",
+            (sib_id, until),
+        )
+        buried.append(sib_id)
+    return buried
+
+
 def unbury_card(conn: sqlite3.Connection, card_id: int) -> bool:
     """Unbury a card. Returns False if not found."""
     existing = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()

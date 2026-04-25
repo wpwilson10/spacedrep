@@ -967,6 +967,46 @@ def test_submit_review_after_unsuspend(tmp_db: Path) -> None:
     assert review_result.rating == "good"
 
 
+def test_submit_review_buries_cloze_siblings(tmp_db: Path) -> None:
+    """Reviewing one cloze sibling buries the others until tomorrow."""
+    cloze = core.add_cloze_note(
+        tmp_db, "{{c1::Ottawa}} is the capital of {{c2::Canada}}", deck="Geo"
+    )
+    assert cloze.card_count == 2
+    first_id, second_id = cloze.card_ids[0], cloze.card_ids[1]
+
+    review = ReviewInput(card_id=first_id, rating=3)
+    result = core.submit_review(tmp_db, review)
+
+    assert result.siblings_buried == [second_id]
+    # Sibling should be excluded from the queue.
+    nxt = core.get_next_card(tmp_db, deck="Geo")
+    assert nxt is None or nxt.card_id != second_id
+
+
+def test_submit_review_buries_reversed_sibling(tmp_db: Path) -> None:
+    """Reviewing one card of a reversed pair buries its sibling."""
+    rev = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+    assert rev.card_count == 2
+    first_id, second_id = rev.card_ids[0], rev.card_ids[1]
+
+    review = ReviewInput(card_id=first_id, rating=3)
+    result = core.submit_review(tmp_db, review)
+
+    assert result.siblings_buried == [second_id]
+
+
+def test_submit_review_no_siblings_unaffected(tmp_db: Path) -> None:
+    """A basic single-card note has no siblings to bury."""
+    added = core.add_card(tmp_db, "Q", "A", deck="Test")
+    card_id = int(added["card_id"])
+
+    review = ReviewInput(card_id=card_id, rating=3)
+    result = core.submit_review(tmp_db, review)
+
+    assert result.siblings_buried == []
+
+
 # ---------------------------------------------------------------------------
 # Bug fix regression tests
 # ---------------------------------------------------------------------------

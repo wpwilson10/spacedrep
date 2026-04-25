@@ -39,6 +39,7 @@ class ReviewResult(BaseModel):
     difficulty: float
     interval_days: float
     is_leech: bool = False
+    siblings_buried: list[int] = []
 
 
 class DueCount(BaseModel):

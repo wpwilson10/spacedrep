@@ -472,6 +472,11 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
             previous_card=fsrs_card,
         )
 
+        from datetime import UTC, datetime, timedelta
+
+        bury_until = (datetime.now(UTC) + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        siblings_buried = db.bury_siblings(conn, review.card_id, bury_until)
+
         # Suspend after update_fsrs_state so queue=-1 isn't overwritten
         if is_leech:
             db.suspend_card(conn, review.card_id)
@@ -496,6 +501,7 @@ def submit_review(db_path: Path, review: ReviewInput) -> ReviewResult:
             difficulty=round(updated_card.difficulty or 0.0, 4),
             interval_days=interval_days,
             is_leech=is_leech,
+            siblings_buried=siblings_buried,
         )
 
 

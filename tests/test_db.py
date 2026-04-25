@@ -865,6 +865,12 @@ def test_bury_not_found(tmp_db: Path) -> None:
     conn.close()
 
 
+def test_bury_siblings_no_match(tmp_db: Path) -> None:
+    conn = db.get_connection(tmp_db)
+    assert db.bury_siblings(conn, 9999, "2099-12-31 23:59:59") == []
+    conn.close()
+
+
 # --- FSRS state tests ---
 
 

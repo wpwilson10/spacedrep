@@ -335,6 +335,50 @@ def test_update_card_not_found(populated_db_multi_deck: Path) -> None:
         core.update_card(populated_db_multi_deck, 9999, question="nope")
 
 
+def test_update_card_deck_move_cloze(tmp_db: Path) -> None:
+    """Moving a cloze sibling moves all siblings together (issue #7A)."""
+    cloze = core.add_cloze_note(
+        tmp_db, "{{c1::Ottawa}} is the capital of {{c2::Canada}}", deck="Geo"
+    )
+    assert cloze.card_count == 2
+    c1, c2 = cloze.card_ids[0], cloze.card_ids[1]
+
+    core.update_card(tmp_db, c1, deck="Other")
+
+    d1 = core.get_card_detail(tmp_db, c1)
+    d2 = core.get_card_detail(tmp_db, c2)
+    assert d1.deck == "Other"
+    assert d2.deck == "Other"
+
+
+def test_update_card_deck_move_reversed(tmp_db: Path) -> None:
+    """Moving one card of a reversed pair moves its sibling too (regression)."""
+    rev = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+    assert rev.card_count == 2
+    c0, c1 = rev.card_ids[0], rev.card_ids[1]
+
+    core.update_card(tmp_db, c0, deck="other")
+
+    d0 = core.get_card_detail(tmp_db, c0)
+    d1 = core.get_card_detail(tmp_db, c1)
+    assert d0.deck == "other"
+    assert d1.deck == "other"
+
+
+def test_update_card_deck_move_basic_unaffected(tmp_db: Path) -> None:
+    """Moving a basic card does not affect unrelated basic cards."""
+    a = core.add_card(tmp_db, "Qa", "Aa", deck="DeckA")
+    b = core.add_card(tmp_db, "Qb", "Ab", deck="DeckA")
+    a_id, b_id = int(a["card_id"]), int(b["card_id"])
+
+    core.update_card(tmp_db, a_id, deck="DeckB")
+
+    da = core.get_card_detail(tmp_db, a_id)
+    db_detail = core.get_card_detail(tmp_db, b_id)
+    assert da.deck == "DeckB"
+    assert db_detail.deck == "DeckA"
+
+
 # --- Bulk Add tests ---
 
 

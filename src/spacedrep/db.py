@@ -910,8 +910,14 @@ def update_card(
         conn.execute("UPDATE notes SET tags=?, mod=?, usn=-1 WHERE id=?", (tags, now, nid))
 
     if deck_id is not None:
-        is_multi_template = minfo is not None and len(minfo.templates) > 1
-        if is_multi_template:
+        # Multi-card notes (reversed pairs, cloze with N>1 deletions) move
+        # all siblings together — splitting them across decks is incoherent
+        # and would be silently undone by the next dedup re-add.
+        sibling_count_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM cards WHERE nid = ?", (nid,)
+        ).fetchone()
+        sibling_count = int(sibling_count_row["n"]) if sibling_count_row is not None else 1
+        if sibling_count > 1:
             conn.execute(
                 "UPDATE cards SET did=?, mod=?, usn=-1 WHERE nid=?",
                 (deck_id, now, nid),

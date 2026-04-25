@@ -257,6 +257,27 @@ class UnsupportedCollectionFormatError(SpacedrepError):
         )
 
 
+class DatabaseOpenError(SpacedrepError):
+    """Raised when a DB path exists but sqlite3 cannot open it.
+
+    Covers corruption, wrong file type, locked files, and read-only
+    filesystem paths where SQLite cannot create its WAL/journal.
+    """
+
+    def __init__(self, db_path: Path, sqlite_error: str) -> None:
+        super().__init__(
+            error_code="database_open_failed",
+            message=f"Cannot open database {db_path}: {sqlite_error}",
+            suggestion=(
+                "Check that the file is a valid SQLite database, that no "
+                "other process is holding a lock, and that the path is "
+                "writable (SQLite needs to create WAL/journal sidecars)."
+            ),
+            exit_code=3,
+            db_path=str(db_path),
+        )
+
+
 class OptimizerNotInstalledError(SpacedrepError):
     def __init__(self) -> None:
         super().__init__(
@@ -358,10 +379,16 @@ def _open_db(db_path: Path, *, require_exists: bool = True) -> Iterator[sqlite3.
     """Open a database connection as a context manager."""
     if require_exists and not db_path.exists():
         raise DatabaseNotFoundError(db_path)
-    conn = db.get_connection(db_path)
     try:
-        if db.is_modern_anki_schema(conn):
-            raise UnsupportedCollectionFormatError(db_path)
+        conn = db.get_connection(db_path)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+        raise DatabaseOpenError(db_path, str(e)) from e
+    try:
+        try:
+            if db.is_modern_anki_schema(conn):
+                raise UnsupportedCollectionFormatError(db_path)
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+            raise DatabaseOpenError(db_path, str(e)) from e
         _ensure_params_loaded(conn)
         yield conn
     finally:
@@ -577,9 +604,9 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
         conn.commit()
         # Preserve order, drop duplicate ids from re-adds (dedup hits).
         # Semantics: `created` is the set of card IDs that exist as a
-        # result of this call; `count` is the size of that set.
+        # result of this call; `total` is the size of that set.
         deduped: list[int] = list(dict.fromkeys(created))
-        return BulkAddResult(created=deduped, count=len(deduped))
+        return BulkAddResult(created=deduped, total=len(deduped))
 
 
 def add_reversed_card(

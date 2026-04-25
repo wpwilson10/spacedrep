@@ -93,9 +93,9 @@ def test_add_card_dedup_different_deck(tmp_db: Path) -> None:
 
 
 def test_add_cards_bulk_dedup(tmp_db: Path) -> None:
-    """Bulk add with duplicate entries dedupes returned ids and count.
+    """Bulk add with duplicate entries dedupes returned ids and total.
 
-    Contract: `count == len(created) == number of distinct cards that
+    Contract: `total == len(created) == number of distinct cards that
     exist as a result of this call`. A re-add of (question, deck)
     updates the existing card in place, so it contributes a single id
     to `created`, not one id per input row.
@@ -108,7 +108,7 @@ def test_add_cards_bulk_dedup(tmp_db: Path) -> None:
         BulkCardInput(question="Q2", answer="A2", deck="Test"),
     ]
     result = core.add_cards_bulk(tmp_db, cards)
-    assert result.count == 2
+    assert result.total == 2
     assert len(result.created) == 2
     assert result.created[0] != result.created[1]
     # The re-add updated the first card in place.
@@ -343,7 +343,7 @@ def test_add_cards_bulk(tmp_db: Path) -> None:
 
     cards = [BulkCardInput(question=f"Q{i}", answer=f"A{i}", deck="Test") for i in range(5)]
     result = core.add_cards_bulk(tmp_db, cards)
-    assert result.count == 5
+    assert result.total == 5
     assert len(result.created) == 5
     # IDs should be unique
     assert len(set(result.created)) == 5
@@ -351,7 +351,7 @@ def test_add_cards_bulk(tmp_db: Path) -> None:
 
 def test_add_cards_bulk_empty(tmp_db: Path) -> None:
     result = core.add_cards_bulk(tmp_db, [])
-    assert result.count == 0
+    assert result.total == 0
     assert result.created == []
 
 
@@ -364,7 +364,7 @@ def test_add_cards_bulk_multi_deck(tmp_db: Path) -> None:
         BulkCardInput(question="Q3", answer="A3", deck="AWS"),
     ]
     result = core.add_cards_bulk(tmp_db, cards)
-    assert result.count == 3
+    assert result.total == 3
     # Verify decks were created
     decks = core.list_decks(tmp_db)
     deck_names = {d.name for d in decks}
@@ -735,7 +735,7 @@ class TestBulkMixed:
             ),
         ]
         result = core.add_cards_bulk(tmp_db, cards)
-        assert result.count == 3  # 1 basic + 2 cloze cards
+        assert result.total == 3  # 1 basic + 2 cloze cards
 
     def test_basic_empty_answer_rejected(self) -> None:
         from pydantic import ValidationError
@@ -1176,7 +1176,7 @@ class TestAddCardsBulkReversed:
         ]
         result = core.add_cards_bulk(tmp_db, cards)
         # 1 basic + 1 cloze + 2 reversed = 4
-        assert result.count == 4
+        assert result.total == 4
         assert len(result.created) == 4
 
     def test_bulk_reversed_missing_answer_raises(self, tmp_db: Path) -> None:
@@ -1190,7 +1190,7 @@ class TestAddCardsBulkReversed:
 
     def test_bulk_reversed_dedup_in_same_batch(self, tmp_db: Path) -> None:
         """Two reversed entries with same (question, deck) within one bulk
-        call hit the dedup path. Expect: one pair of cards (count=2), no
+        call hit the dedup path. Expect: one pair of cards (total=2), no
         duplicate ids in `created`, and only 2 cards in the DB after.
         """
         from spacedrep.models import BulkCardInput
@@ -1200,7 +1200,7 @@ class TestAddCardsBulkReversed:
             BulkCardInput(question="DupQ", answer="A2", type="reversed", deck="bulk"),
         ]
         result = core.add_cards_bulk(tmp_db, cards)
-        assert result.count == 2
+        assert result.total == 2
         assert len(result.created) == 2
         assert result.created[0] != result.created[1]
         listed = core.list_cards(tmp_db, deck="bulk")

@@ -164,7 +164,7 @@ class BulkAddResult(BaseModel):
     """Result of bulk card creation."""
 
     created: list[int]
-    count: int
+    total: int
 
 
 class RatingPreview(BaseModel):

@@ -1,6 +1,7 @@
 """CLI integration tests using subprocess."""
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,10 +15,13 @@ def _run(args: list[str], db_path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
 
-def _run_bare(args: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run spacedrep CLI without --db."""
+def _run_bare(
+    args: list[str], env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run spacedrep CLI without --db. Optionally override env vars."""
     cmd = ["uv", "run", "--project", _PROJECT, "spacedrep", *args]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    proc_env = {**os.environ, **(env or {})} if env else None
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=proc_env)
 
 
 def _init_db(db_path: Path) -> None:
@@ -182,7 +186,7 @@ class TestCardTags:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert data["tags"] == []
-            assert data["count"] == 0
+            assert data["total"] == 0
 
     def test_tags_with_cards(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -195,7 +199,7 @@ class TestCardTags:
             assert result.returncode == 0
             data = json.loads(result.stdout)
             assert sorted(data["tags"]) == ["aws", "compute", "s3"]
-            assert data["count"] == 3
+            assert data["total"] == 3
 
     def test_tags_quiet(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -416,7 +420,7 @@ class TestDeck:
             # Anki schema always has a Default deck
             assert isinstance(data, dict)
             assert "decks" in data
-            assert "count" in data
+            assert "total" in data
             names: list[str] = [d["name"] for d in data["decks"]]  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
             assert "Default" in names
 
@@ -462,7 +466,7 @@ class TestBulkAdd:
             )
             assert result.returncode == 0
             data = json.loads(result.stdout)
-            assert data["count"] == 2
+            assert data["total"] == 2
             assert len(data["created"]) == 2
 
     def test_add_bulk_invalid_json(self) -> None:
@@ -577,6 +581,19 @@ class TestErrorHandling:
             assert result.returncode == 3
             data = json.loads(result.stderr)
             assert data["error"] == "database_not_found"
+
+    def test_db_not_a_database(self) -> None:
+        """Path exists but isn't a SQLite DB → structured error, not a traceback."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "notdb.bin"
+            db_path.write_bytes(b"not a database")
+
+            result = _run(["deck", "list"], db_path)
+            assert result.returncode == 3
+            assert "Traceback" not in result.stderr
+            data = json.loads(result.stderr)
+            assert data["error"] == "database_open_failed"
+            assert data["db_path"] == str(db_path)
 
 
 class TestQuiet:
@@ -765,3 +782,19 @@ class TestCardAddReversed:
 
             list_result = _run(["card", "list", "--deck", "d"], db_path)
             assert json.loads(list_result.stdout)["total"] == 2
+
+
+class TestEnvVar:
+    def test_spacedrep_db_envvar_used_when_no_flag(self) -> None:
+        """SPACEDREP_DB env var is honored by CLI when --db is not passed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "envvar.db"
+            _init_db(db_path)
+            _add_card(db_path, "EnvQ", "EnvA", deck="env-deck")
+
+            # No --db flag; resolves via env var.
+            result = _run_bare(["deck", "list"], env={"SPACEDREP_DB": str(db_path)})
+            assert result.returncode == 0, result.stderr
+            data = json.loads(result.stdout)
+            deck_names = {d["name"] for d in data["decks"]}
+            assert "env-deck" in deck_names

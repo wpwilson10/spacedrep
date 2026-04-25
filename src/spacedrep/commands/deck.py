@@ -26,7 +26,7 @@ def list_decks(
         if quiet:
             output_quiet([d.name for d in result])
         else:
-            output_json({"decks": [d.model_dump() for d in result], "count": len(result)})
+            output_json({"decks": [d.model_dump() for d in result], "total": len(result)})
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None

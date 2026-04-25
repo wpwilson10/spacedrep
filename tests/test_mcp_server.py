@@ -93,7 +93,7 @@ class TestAddCardsBulk:
             ]
         )
         result = add_cards_bulk(cards_json)
-        assert result["count"] == 2
+        assert result["total"] == 2
         assert len(result["created"]) == 2
 
     def test_invalid_json(self, tmp_db: Path) -> None:
@@ -102,7 +102,7 @@ class TestAddCardsBulk:
 
     def test_empty_array(self, tmp_db: Path) -> None:
         result = add_cards_bulk("[]")
-        assert result["count"] == 0
+        assert result["total"] == 0
 
 
 class TestGetNextCard:
@@ -261,19 +261,19 @@ class TestListTags:
     def test_empty(self, tmp_db: Path) -> None:
         result = list_tags()
         assert result["tags"] == []
-        assert result["count"] == 0
+        assert result["total"] == 0
 
     def test_with_cards(self, card_id: int, tmp_db: Path) -> None:
         result = list_tags()
         assert "distributed" in result["tags"]
-        assert result["count"] >= 1
+        assert result["total"] >= 1
 
 
 class TestListDecks:
     def test_empty(self, tmp_db: Path) -> None:
         result = list_decks()
         # Anki schema always has a "Default" deck
-        assert result["count"] >= 1
+        assert result["total"] >= 1
         names = [d["name"] for d in result["decks"]]
         assert "Default" in names
 
@@ -688,7 +688,7 @@ class TestAddCardsBulkReversed:
         )
         result = add_cards_bulk(cards_json)
         # 1 basic + 2 reversed = 3
-        assert result["count"] == 3
+        assert result["total"] == 3
 
     def test_bulk_reversed_missing_answer_rejected(self, tmp_db: Path) -> None:
         cards_json = json.dumps([{"question": "Q", "type": "reversed", "deck": "d"}])

@@ -245,7 +245,7 @@ def list_tags(
             for tag in tags:
                 output_quiet(tag)
         else:
-            output_json({"tags": tags, "count": len(tags)})
+            output_json({"tags": tags, "total": len(tags)})
     except core.SpacedrepError as e:
         output_error(e)
         raise typer.Exit(code=e.exit_code) from None

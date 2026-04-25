@@ -551,7 +551,7 @@ def preview_review(card_id: int) -> dict[str, Any]:
 def list_decks() -> dict[str, object]:
     """List all decks with their card counts and due counts."""
     decks = core.list_decks(_db_path())
-    return {"decks": [d.model_dump() for d in decks], "count": len(decks)}
+    return {"decks": [d.model_dump() for d in decks], "total": len(decks)}
 
 
 @mcp.tool()
@@ -593,7 +593,7 @@ def list_tags() -> dict[str, object]:
     taxonomy before filtering cards by tag. Tags use :: for hierarchy
     (e.g. 'foundations::rag::chunking')."""
     tags = core.list_tags(_db_path())
-    return {"tags": tags, "count": len(tags)}
+    return {"tags": tags, "total": len(tags)}
 
 
 # ---------------------------------------------------------------------------

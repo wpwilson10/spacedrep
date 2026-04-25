@@ -1321,12 +1321,87 @@ class TestReversedLifecycle:
             questions = {c.question for c in cards}
             assert questions == {"Capital of France", "Paris"}
 
-    def test_basic_then_reversed_creates_three_cards(self, tmp_db: Path) -> None:
-        """Documented limitation: no cross-model dedup; both notes coexist."""
-        core.add_card(tmp_db, "Q", "A", deck="d")
-        core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+    def test_add_reversed_errors_on_existing_basic(self, tmp_db: Path) -> None:
+        """Adding a reversed note where a basic note with the same
+        (question, deck) exists raises CrossModelCollisionError instead of
+        silently creating a parallel note."""
+        basic = core.add_card(tmp_db, "Q", "A", deck="d")
+        with pytest.raises(core.CrossModelCollisionError) as excinfo:
+            core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        assert excinfo.value.error_code == "cross_model_collision"
+        assert excinfo.value.extra["existing_card_id"] == basic["card_id"]
+        assert "batch_index" not in excinfo.value.extra
+        # No partial state — only the original basic card exists.
+        assert len(core.list_cards(tmp_db).cards) == 1
+
+    def test_add_basic_errors_on_existing_reversed(self, tmp_db: Path) -> None:
+        """Adding a basic note where a reversed pair with the same
+        (question, deck) exists raises CrossModelCollisionError. The
+        existing_card_id points at the reversed pair's forward card
+        (ord=0), which matches the sfld."""
+        reversed_result = core.add_reversed_card(tmp_db, "Q", "A", deck="d")
+        with pytest.raises(core.CrossModelCollisionError) as excinfo:
+            core.add_card(tmp_db, "Q", "A", deck="d")
+        assert excinfo.value.extra["existing_card_id"] == reversed_result.card_ids[0]
+        assert "batch_index" not in excinfo.value.extra
+        assert len(core.list_cards(tmp_db).cards) == 2
+
+    def test_basic_and_reversed_in_other_deck_do_not_collide(self, tmp_db: Path) -> None:
+        """Collision is scoped to the target deck. Same question in different
+        decks is not a conflict."""
+        core.add_card(tmp_db, "Q", "A", deck="d1")
+        core.add_reversed_card(tmp_db, "Q", "A", deck="d2")
+        assert len(core.list_cards(tmp_db).cards) == 3  # 1 basic + 2 reversed
+
+    def test_bulk_raises_on_cross_model_collision(self, tmp_db: Path) -> None:
+        """Cross-model collision inside a single bulk batch aborts the whole
+        batch — no partial inserts survive."""
+        from spacedrep.models import BulkCardInput
+
+        batch = [
+            BulkCardInput(question="Q", answer="A", deck="d", type="basic"),
+            BulkCardInput(question="Q", answer="A", deck="d", type="reversed"),
+        ]
+        with pytest.raises(core.CrossModelCollisionError) as excinfo:
+            core.add_cards_bulk(tmp_db, batch)
+        # The second item (index 1) is the colliding one.
+        assert excinfo.value.extra["batch_index"] == 1
+        assert "[batch item 1]" in excinfo.value.message
+        # Transaction rolled back; no cards committed.
+        assert len(core.list_cards(tmp_db).cards) == 0
+
+    def test_update_deck_on_reversed_moves_both(self, tmp_db: Path) -> None:
+        """Moving one card of a reversed pair via update_card --deck moves its
+        sibling too — siblings share one note, and single-card moves would
+        split the pair (then get silently reverted on the next re-add)."""
+        r = core.add_reversed_card(tmp_db, "Q", "A", deck="origin")
+        forward, reverse = r.card_ids
+        core.update_card(tmp_db, forward, deck="destination")
+        assert core.get_card_detail(tmp_db, forward).deck == "destination"
+        assert core.get_card_detail(tmp_db, reverse).deck == "destination"
+
+    def test_update_deck_on_basic_moves_only_card(self, tmp_db: Path) -> None:
+        """Single-template basic notes keep per-card deck scope — only the
+        targeted card moves."""
+        a_id = int(core.add_card(tmp_db, "Q1", "A1", deck="a")["card_id"])
+        b_id = int(core.add_card(tmp_db, "Q2", "A2", deck="a")["card_id"])
+        core.update_card(tmp_db, a_id, deck="b")
+        assert core.get_card_detail(tmp_db, a_id).deck == "b"
+        assert core.get_card_detail(tmp_db, b_id).deck == "a"
+
+    def test_update_deck_on_imported_multi_template_moves_both(
+        self, tmp_db: Path, basic_reversed_apkg: Path
+    ) -> None:
+        """Template-awareness extends to imported multi-template models, not
+        just spacedrep's own reversed model."""
+        core.open_deck(tmp_db, basic_reversed_apkg, force=True)
         cards = core.list_cards(tmp_db).cards
-        assert len(cards) == 3
+        assert len(cards) == 2
+        first = cards[0].card_id
+        second = cards[1].card_id
+        core.update_card(tmp_db, first, deck="moved")
+        assert core.get_card_detail(tmp_db, first).deck == "moved"
+        assert core.get_card_detail(tmp_db, second).deck == "moved"
 
 
 # ---------------------------------------------------------------------------

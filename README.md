@@ -32,7 +32,7 @@ Optional extras: `spacedrep[mcp]` for the MCP server, `spacedrep[optimizer]` for
 
 - **FSRS scheduling** — same algorithm as Anki 23.10+, with parameter optimization from your review history
 - **Cloze deletions** — `{{c1::answer}}` syntax, auto-expands into multiple cards
-- **Reversed cards** — one note becomes two cards (Q→A and A→Q); edits are template-aware and re-adds dedupe on (question, deck)
+- **Reversed cards** — one note becomes two cards (Q→A and A→Q); edits are template-aware and re-adds dedupe on (question, deck). Basic ↔ reversed collisions are caught with a clear error — delete the existing card first to convert it
 - **Anki-native storage** — single SQLite file using Anki's schema for full round-trip compatibility
 - **Rich filtering** — by deck, tags, state, date ranges, FSRS properties, and more
 - **Agent-friendly** — duplicate detection, leech detection, review preview, bury/unbury, review history

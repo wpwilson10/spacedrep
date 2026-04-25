@@ -77,6 +77,11 @@ def add_card(
 ) -> None:
     """Add a new flashcard.
 
+    Dedup matches the question used at creation — editing via `card update`
+    and re-adding with the new text creates a separate note. Raises
+    cross_model_collision if a reversed note with the same (question, deck)
+    already exists.
+
     Example:
         spacedrep card add "Why eventual consistency?" "Availability tradeoff" --deck AWS --tags s3
         spacedrep card add "Q" "A" -q
@@ -307,8 +312,9 @@ def update_card(
     Field resolution is template-aware: `--question` edits whichever
     note field renders as *this* card's front. For a reversed pair
     both cards share one note, so edits also update the other card's
-    corresponding side. Cloze cards are rejected — use
-    `card update-cloze` instead.
+    corresponding side. `--deck` on a reversed card moves both siblings
+    (splitting them would be silently reverted on the next re-add).
+    Cloze cards are rejected — use `card update-cloze` instead.
 
     Example:
         spacedrep card update 1 --question "Updated question" --deck DSA
@@ -436,9 +442,15 @@ def add_reversed(
 
     Re-running with the same (question, deck) updates the existing note
     in place — both cards reflect the new answer, review history is
-    preserved. To edit the text later, either re-run add-reversed or use
-    `card update` (template-aware: edits the side of the specific card
-    you name).
+    preserved. Dedup matches the question used at creation: editing the
+    Question via `card update` and then re-running add-reversed with the
+    new text creates a separate note.
+
+    To edit the text later, use `card update` (template-aware: edits the
+    side of the specific card you name).
+
+    Raises cross_model_collision if a basic note with the same
+    (question, deck) already exists; delete that card first.
 
     Example:
         spacedrep card add-reversed "Capital of France" "Paris" --deck geo
@@ -463,6 +475,10 @@ def add_cloze(
     db: Path = DB_DEFAULT,
 ) -> None:
     """Add a cloze deletion note that expands into multiple flashcards.
+
+    Dedup keys on the exact cloze text. Use `card update-cloze` to edit
+    an existing cloze note; re-running add-cloze with different text
+    creates a new note.
 
     Example:
         spacedrep card add-cloze "{{c1::Ottawa}} is the capital of {{c2::Canada}}" --deck Geo

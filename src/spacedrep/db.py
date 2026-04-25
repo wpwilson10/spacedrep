@@ -23,6 +23,8 @@ from spacedrep.anki_render import (
 )
 from spacedrep.anki_schema import (
     ANKI_SCHEMA,
+    BASIC_MODEL_ID,
+    BASIC_REVERSED_MODEL_ID,
     ColMeta,
     anki_fields_to_fsrs_card,
     due_to_datetime,
@@ -289,6 +291,44 @@ def list_decks(conn: sqlite3.Connection) -> list[DeckInfo]:
 # ---------------------------------------------------------------------------
 # Card insert
 # ---------------------------------------------------------------------------
+
+
+def find_cross_model_conflict(
+    conn: sqlite3.Connection,
+    *,
+    question: str,
+    deck_name: str,
+    this_model_id: int,
+) -> tuple[int, int] | None:
+    """Find a conflicting note in the opposite spacedrep basic-family model.
+
+    Looks for an existing note with sfld == question in the named deck whose
+    model is the *other* of (BASIC_MODEL_ID, BASIC_REVERSED_MODEL_ID) relative
+    to ``this_model_id``. Returns (card_id, other_mid) or None.
+
+    Cloze model is exempt — cloze text rarely collides with basic/reversed
+    questions. If the deck doesn't exist yet, no conflict is possible.
+    """
+    candidates = (BASIC_MODEL_ID, BASIC_REVERSED_MODEL_ID)
+    if this_model_id not in candidates:
+        return None
+    meta = load_col_meta(conn)
+    did = meta.get_deck_id(deck_name)
+    if did is None:
+        return None
+    row = conn.execute(
+        """SELECT c.id AS card_id, n.mid
+           FROM notes n
+           JOIN cards c ON c.nid = n.id
+           WHERE n.sfld = ? AND c.did = ?
+             AND n.mid IN (?, ?)
+             AND n.mid != ?
+           ORDER BY c.ord ASC LIMIT 1""",
+        (question, did, candidates[0], candidates[1], this_model_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return (int(row["card_id"]), int(row["mid"]))
 
 
 def insert_card(
@@ -793,6 +833,10 @@ def update_card(
     fields that correspond to this specific card's front/back, not fixed
     positions 0/1. For cloze cards this raises ClozeUpdateNotSupportedError —
     callers should use update_cloze_note instead.
+
+    Deck moves are also template-aware: for multi-template notes both cards
+    of the pair move together (siblings share one note), matching the
+    dedup re-add path. Single-template notes move only the targeted card.
     """
     now = int(time.time())
     row = conn.execute(
@@ -809,9 +853,11 @@ def update_card(
     flds = str(row["flds"])
     parts = flds.split("\x1f")
 
+    minfo: ModelInfo | None = None
+    if question is not None or answer is not None or deck_id is not None:
+        minfo = _get_models(conn).get(mid_str)
+
     if question is not None or answer is not None:
-        models = _get_models(conn)
-        minfo = models.get(mid_str)
         if minfo is not None and minfo.model_type == 1:
             raise ClozeUpdateNotSupportedError(card_id)
 
@@ -838,7 +884,17 @@ def update_card(
         conn.execute("UPDATE notes SET tags=?, mod=?, usn=-1 WHERE id=?", (tags, now, nid))
 
     if deck_id is not None:
-        conn.execute("UPDATE cards SET did=?, mod=?, usn=-1 WHERE id=?", (deck_id, now, card_id))
+        is_multi_template = minfo is not None and len(minfo.templates) > 1
+        if is_multi_template:
+            conn.execute(
+                "UPDATE cards SET did=?, mod=?, usn=-1 WHERE nid=?",
+                (deck_id, now, nid),
+            )
+        else:
+            conn.execute(
+                "UPDATE cards SET did=?, mod=?, usn=-1 WHERE id=?",
+                (deck_id, now, card_id),
+            )
 
     conn.execute("UPDATE cards SET mod=?, usn=-1 WHERE id=?", (now, card_id))
     invalidate_model_cache(conn)

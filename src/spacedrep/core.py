@@ -16,6 +16,8 @@ from pathlib import Path
 from spacedrep import db, fsrs_engine
 from spacedrep.anki_schema import (
     ANKI_SCHEMA,
+    BASIC_MODEL_ID,
+    BASIC_REVERSED_MODEL_ID,
     CLOZE_MODEL_ID,
     ColMeta,
     basic_guid,
@@ -169,6 +171,70 @@ class UpdateClozeCardError(SpacedrepError):
             exit_code=2,
             card_id=card_id,
         )
+
+
+class CrossModelCollisionError(SpacedrepError):
+    """Raised when adding a basic or reversed note collides with an existing
+    note of the other spacedrep model at the same (question, deck).
+
+    Cross-model dedup is not supported — the caller must delete the existing
+    card first. Cloze notes are exempt (they occupy a separate namespace).
+    """
+
+    def __init__(
+        self,
+        existing_card_id: int,
+        existing_model: str,
+        new_model: str,
+        batch_index: int | None = None,
+    ) -> None:
+        message = (
+            f"Cannot add {new_model} note: a {existing_model} note with the "
+            f"same question already exists in this deck (card {existing_card_id})."
+        )
+        extras: dict[str, str | int | None] = {"existing_card_id": existing_card_id}
+        if batch_index is not None:
+            message = f"[batch item {batch_index}] {message}"
+            extras["batch_index"] = batch_index
+        super().__init__(
+            error_code="cross_model_collision",
+            message=message,
+            suggestion=(
+                f"Delete card {existing_card_id} first, then re-add as {new_model}. "
+                "Review history on the existing card will be lost."
+            ),
+            exit_code=2,
+            **extras,
+        )
+
+
+_MODEL_DISPLAY_NAMES: dict[int, str] = {
+    BASIC_MODEL_ID: "basic",
+    BASIC_REVERSED_MODEL_ID: "reversed",
+}
+
+
+def _raise_if_cross_model_conflict(
+    conn: sqlite3.Connection,
+    *,
+    question: str,
+    deck: str,
+    this_model_id: int,
+    new_model: str,
+    batch_index: int | None = None,
+) -> None:
+    conflict = db.find_cross_model_conflict(
+        conn, question=question, deck_name=deck, this_model_id=this_model_id
+    )
+    if conflict is None:
+        return
+    existing_id, other_mid = conflict
+    raise CrossModelCollisionError(
+        existing_card_id=existing_id,
+        existing_model=_MODEL_DISPLAY_NAMES.get(other_mid, "unknown"),
+        new_model=new_model,
+        batch_index=batch_index,
+    )
 
 
 class UnsupportedCollectionFormatError(SpacedrepError):
@@ -414,7 +480,15 @@ def add_card(
     tags: str = "",
     source: CardSource = "manual",
 ) -> dict[str, int | str | bool]:
-    """Add a new card. Re-adding the same question to the same deck updates the existing card."""
+    """Add a new card. Re-adding the same question to the same deck updates the existing card.
+
+    Dedup matches the question value used at note *creation* — after
+    update_card rewrites the Question field, re-adding with the new text
+    creates a separate note.
+
+    Raises CrossModelCollisionError if a reversed note with the same
+    (question, deck) already exists.
+    """
     if not question.strip():
         raise EmptyFieldError("question")
     if not answer.strip():
@@ -422,6 +496,13 @@ def add_card(
     if not deck.strip():
         raise EmptyFieldError("deck")
     with _open_db(db_path) as conn:
+        _raise_if_cross_model_conflict(
+            conn,
+            question=question,
+            deck=deck,
+            this_model_id=BASIC_MODEL_ID,
+            new_model="basic",
+        )
         guid = basic_guid(question, deck)
         card_id, was_update = db.insert_card(
             conn,
@@ -437,10 +518,16 @@ def add_card(
 
 
 def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
-    """Add multiple cards in a single transaction."""
+    """Add multiple cards in a single transaction.
+
+    Raises CrossModelCollisionError (aborting the whole batch) if any basic
+    item would collide with an existing reversed note at the same
+    (question, deck), or vice versa — including intra-batch collisions
+    (items earlier in the list are visible to later checks).
+    """
     with _open_db(db_path) as conn:
         created: list[int] = []
-        for card_input in cards:
+        for i, card_input in enumerate(cards):
             if card_input.type == "cloze":
                 guid = cloze_guid(card_input.question)
                 card_ids = _expand_cloze(
@@ -448,6 +535,14 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
                 )
                 created.extend(card_ids)
             elif card_input.type == "reversed":
+                _raise_if_cross_model_conflict(
+                    conn,
+                    question=card_input.question,
+                    deck=card_input.deck,
+                    this_model_id=BASIC_REVERSED_MODEL_ID,
+                    new_model="reversed",
+                    batch_index=i,
+                )
                 rev_guid = reversed_guid(card_input.question, card_input.deck)
                 _, rev_card_ids, _ = db.insert_reversed_note(
                     conn,
@@ -460,6 +555,14 @@ def add_cards_bulk(db_path: Path, cards: list[BulkCardInput]) -> BulkAddResult:
                 )
                 created.extend(rev_card_ids)
             else:
+                _raise_if_cross_model_conflict(
+                    conn,
+                    question=card_input.question,
+                    deck=card_input.deck,
+                    this_model_id=BASIC_MODEL_ID,
+                    new_model="basic",
+                    batch_index=i,
+                )
                 guid = basic_guid(card_input.question, card_input.deck)
                 card_id, _ = db.insert_card(
                     conn,
@@ -491,7 +594,12 @@ def add_reversed_card(
 
     Re-adding with the same (question, deck) updates the existing note in
     place — both cards reflect the new answer and review history is
-    preserved.
+    preserved. Dedup matches the question value used at note *creation*:
+    after update_card rewrites the Question field, re-adding with the
+    new text creates a separate note.
+
+    Raises CrossModelCollisionError if a basic note with the same
+    (question, deck) already exists.
     """
     if not question.strip():
         raise EmptyFieldError("question")
@@ -500,6 +608,13 @@ def add_reversed_card(
     if not deck.strip():
         raise EmptyFieldError("deck")
     with _open_db(db_path) as conn:
+        _raise_if_cross_model_conflict(
+            conn,
+            question=question,
+            deck=deck,
+            this_model_id=BASIC_REVERSED_MODEL_ID,
+            new_model="reversed",
+        )
         guid = reversed_guid(question, deck)
         note_id, card_ids, _ = db.insert_reversed_note(
             conn,
@@ -610,7 +725,12 @@ def add_cloze_note(
     deck: str = "Default",
     tags: str = "",
 ) -> ClozeAddResult:
-    """Add a cloze deletion note that expands into multiple flashcards."""
+    """Add a cloze deletion note that expands into multiple flashcards.
+
+    Dedup keys on the exact cloze text. Editing the text via
+    update_cloze_note preserves the note; calling add_cloze_note with
+    different text creates a separate note.
+    """
     if not _CLOZE_PATTERN.search(text):
         raise NoClozeMarkersError()
     if not deck.strip():

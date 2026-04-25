@@ -132,8 +132,17 @@ def add_card(
     tags: Annotated[str, Field(description="Space-separated tag names")] = "",
 ) -> dict[str, Any]:
     """Add a new flashcard. Re-adding the same question to the same deck updates
-    the existing card instead of creating a duplicate. Tags are space-separated.
-    Use :: for hierarchy (e.g. 'foundations::rag').
+    the existing card instead of creating a duplicate.
+
+    Dedup matches the question value used at note *creation* — if you
+    later edit the Question via update_card and then re-add with the new
+    text, you will get a separate note, not an update.
+
+    Raises cross_model_collision if a reversed note with the same
+    (question, deck) already exists; delete that card first to convert
+    it to basic.
+
+    Tags are space-separated. Use :: for hierarchy (e.g. 'foundations::rag').
     Returns the card ID, deck name, and was_update flag."""
     return core.add_card(_db_path(), question, answer, deck=deck, tags=tags)
 
@@ -151,9 +160,17 @@ def add_reversed_card(
     want to be quizzed in both directions.
 
     Re-adding with the same (question, deck) updates the existing note
-    in place and preserves review history on both cards. To edit just
-    one side, use update_card on the specific card_id — it is
-    template-aware and edits the correct card's front/back.
+    in place and preserves review history on both cards. Dedup matches
+    the question value used at note *creation* — if you later edit the
+    Question via update_card and then re-add with the new text, you will
+    get a separate note, not an update.
+
+    To edit just one side, use update_card on the specific card_id — it
+    is template-aware and edits the correct card's front/back.
+
+    Raises cross_model_collision if a basic note with the same
+    (question, deck) already exists; delete that card first to convert
+    it to reversed.
 
     Returns note_id, card_ids (both directions), card_count (=2), deck."""
     return _serialize(core.add_reversed_card(_db_path(), question, answer, deck=deck, tags=tags))
@@ -177,7 +194,13 @@ def add_cards_bulk(
     answer, deck (optional), tags (optional), type (optional: 'basic',
     'cloze', or 'reversed'). When type='cloze', question contains cloze
     text and answer is ignored. When type='reversed', two cards are
-    created from one shared note (Q→A and A→Q)."""
+    created from one shared note (Q→A and A→Q).
+
+    A cross_model_collision error (basic ↔ reversed with the same
+    (question, deck)) aborts the entire batch — no partial inserts.
+    Intra-batch collisions are caught too. The error includes
+    `batch_index` (0-based) of the failing item, so the caller can
+    pinpoint which entry collided without re-running."""
     from pydantic import TypeAdapter, ValidationError
 
     try:
@@ -204,8 +227,10 @@ def add_cloze_note(
     """Add a cloze deletion note that expands into multiple flashcards.
     Use {{c1::answer}} syntax. Each cloze number creates one card.
     Example: '{{c1::Ottawa}} is capital of {{c2::Canada}}' creates 2 cards.
-    To edit an existing cloze note, use update_cloze_note instead -- re-adding
-    changed text creates a new note and leaves old cards as orphans."""
+
+    Dedup keys on the exact cloze text. To edit an existing cloze note,
+    use update_cloze_note — re-adding with different text creates a new
+    note and leaves old cards as orphans."""
     return _serialize(core.add_cloze_note(_db_path(), text, deck=deck, tags=tags))
 
 
@@ -410,6 +435,11 @@ def update_card(
     the Question field; ord=1 writes the Answer field), so the edit
     shows up where you expect. Both cards of a reversed pair share one
     note, so edits propagate to both in the correct positions.
+
+    `deck` is also template-aware: moving a reversed card's deck moves
+    its sibling too (reversed pairs share one note, so splitting them
+    across decks would be silently reverted on the next re-add). For
+    single-template basic cards, `deck` moves only the named card.
 
     Cloze cards are rejected with an `update_cloze_card` error — use
     update_cloze_note to edit cloze text."""

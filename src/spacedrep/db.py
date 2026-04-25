@@ -46,6 +46,9 @@ from spacedrep.models import (
 
 VALID_STATES = frozenset({"new", "learning", "review", "relearning"})
 
+# How many recent reviews to inline on get_next_due_card / get_card responses.
+INLINE_HISTORY_LIMIT = 3
+
 
 class ClozeUpdateNotSupportedError(Exception):
     """Raised by update_card when called on a cloze card.
@@ -630,6 +633,26 @@ def get_next_due_card(
     fsrs_card = anki_fields_to_fsrs_card(dict(row), crt)
     retrievability = fsrs_engine.get_retrievability(fsrs_card)
 
+    # Total still-due under the same filters (includes the card we're returning).
+    count_query = f"""
+        SELECT COUNT(*) AS n
+        FROM cards c
+        JOIN notes n ON n.id = c.nid
+        LEFT JOIN spacedrep_card_extra sce ON sce.card_id = c.id
+        WHERE c.queue >= 0
+        AND (sce.buried_until IS NULL OR sce.buried_until <= ?)
+        AND (
+            (c.type = 0 AND c.queue = 0)
+            OR (c.type IN (1, 3) AND c.due <= ?)
+            OR (c.type = 2 AND c.due <= ?)
+        )
+        {filter_sql}
+    """
+    count_row = conn.execute(count_query, [_now_str(), now_ts, now_days, *filter_params]).fetchone()
+    due_remaining = int(count_row["n"]) if count_row is not None else 0
+
+    recent = get_review_history(conn, int(row["card_id"]), limit=INLINE_HISTORY_LIMIT)
+
     return CardDue(
         card_id=row["card_id"],
         question=question,
@@ -639,6 +662,8 @@ def get_next_due_card(
         state=card_state_name(row["type"], lrt),
         retrievability=round(retrievability, 4),
         extra_fields=extra,
+        recent_reviews=recent,
+        due_remaining=due_remaining,
     )
 
 
@@ -809,6 +834,7 @@ def get_card_detail(conn: sqlite3.Connection, card_id: int) -> CardDetail | None
         last_review=last_review_str,
         review_count=row["review_count"],
         lapse_count=row["lapses"],
+        recent_reviews=get_review_history(conn, card_id, limit=INLINE_HISTORY_LIMIT),
     )
 
 
@@ -1134,17 +1160,33 @@ def insert_review_log(
         )
 
 
-def get_review_history(conn: sqlite3.Connection, card_id: int) -> list[ReviewLogEntry]:
-    """Get review history for a card."""
-    rows = conn.execute(
-        """SELECT r.id, r.cid, r.ease, r.id AS review_ts,
-                  sre.user_answer, sre.feedback, sre.session_id
-           FROM revlog r
-           LEFT JOIN spacedrep_review_extra sre ON sre.revlog_id = r.id
-           WHERE r.cid = ?
-           ORDER BY r.id""",
-        (card_id,),
-    ).fetchall()
+def get_review_history(
+    conn: sqlite3.Connection, card_id: int, *, limit: int | None = None
+) -> list[ReviewLogEntry]:
+    """Get review history for a card. With limit, returns the most recent N
+    entries (still in chronological order, oldest first)."""
+    if limit is not None:
+        rows = conn.execute(
+            """SELECT r.id, r.cid, r.ease, r.id AS review_ts,
+                      sre.user_answer, sre.feedback, sre.session_id
+               FROM revlog r
+               LEFT JOIN spacedrep_review_extra sre ON sre.revlog_id = r.id
+               WHERE r.cid = ?
+               ORDER BY r.id DESC
+               LIMIT ?""",
+            (card_id, limit),
+        ).fetchall()
+        rows = list(reversed(rows))
+    else:
+        rows = conn.execute(
+            """SELECT r.id, r.cid, r.ease, r.id AS review_ts,
+                      sre.user_answer, sre.feedback, sre.session_id
+               FROM revlog r
+               LEFT JOIN spacedrep_review_extra sre ON sre.revlog_id = r.id
+               WHERE r.cid = ?
+               ORDER BY r.id""",
+            (card_id,),
+        ).fetchall()
     return [
         ReviewLogEntry(
             card_id=row["cid"],

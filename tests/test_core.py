@@ -1007,6 +1007,77 @@ def test_submit_review_no_siblings_unaffected(tmp_db: Path) -> None:
     assert result.siblings_buried == []
 
 
+def test_get_next_card_includes_recent_reviews(tmp_db: Path) -> None:
+    """card next returns up to the last INLINE_HISTORY_LIMIT reviews inline."""
+    from spacedrep import db as db_mod
+
+    added = core.add_card(tmp_db, "Q", "A", deck="Test")
+    card_id = int(added["card_id"])
+
+    for i in range(4):
+        core.submit_review(tmp_db, ReviewInput(card_id=card_id, rating=3, user_answer=f"a{i}"))
+
+    # Force the card back to due so card next surfaces it.
+    conn = db_mod.get_connection(tmp_db)
+    conn.execute("UPDATE cards SET due = 0, type = 2, queue = 2 WHERE id = ?", (card_id,))
+    conn.commit()
+    conn.close()
+
+    due = core.get_next_card(tmp_db, deck="Test")
+    assert due is not None
+    assert due.card_id == card_id
+    assert len(due.recent_reviews) == 3
+    # Chronological order: oldest of the 3 first.
+    assert [r.user_answer for r in due.recent_reviews] == ["a1", "a2", "a3"]
+
+
+def test_get_next_card_new_card_empty_history(tmp_db: Path) -> None:
+    """Brand-new card has no review history yet."""
+    core.add_card(tmp_db, "Q", "A", deck="Test")
+    due = core.get_next_card(tmp_db, deck="Test")
+    assert due is not None
+    assert due.recent_reviews == []
+
+
+def test_get_next_card_due_remaining(tmp_db: Path) -> None:
+    """due_remaining reflects total still-due, including the returned card."""
+    for i in range(5):
+        core.add_card(tmp_db, f"Q{i}", f"A{i}", deck="Test")
+
+    due = core.get_next_card(tmp_db, deck="Test")
+    assert due is not None
+    assert due.due_remaining == 5
+
+
+def test_get_next_card_due_remaining_respects_filters(tmp_db: Path) -> None:
+    """due_remaining honors the same filters as the SELECT (deck filter here)."""
+    for i in range(3):
+        core.add_card(tmp_db, f"QA{i}", f"A{i}", deck="DeckA")
+    for i in range(2):
+        core.add_card(tmp_db, f"QB{i}", f"A{i}", deck="DeckB")
+
+    due_a = core.get_next_card(tmp_db, deck="DeckA")
+    assert due_a is not None
+    assert due_a.due_remaining == 3
+
+    due_b = core.get_next_card(tmp_db, deck="DeckB")
+    assert due_b is not None
+    assert due_b.due_remaining == 2
+
+
+def test_get_card_includes_recent_reviews(tmp_db: Path) -> None:
+    """get_card_detail returns the same recent_reviews field."""
+    added = core.add_card(tmp_db, "Q", "A", deck="Test")
+    card_id = int(added["card_id"])
+
+    for i in range(2):
+        core.submit_review(tmp_db, ReviewInput(card_id=card_id, rating=3, feedback=f"f{i}"))
+
+    detail = core.get_card_detail(tmp_db, card_id)
+    assert len(detail.recent_reviews) == 2
+    assert [r.feedback for r in detail.recent_reviews] == ["f0", "f1"]
+
+
 # ---------------------------------------------------------------------------
 # Bug fix regression tests
 # ---------------------------------------------------------------------------

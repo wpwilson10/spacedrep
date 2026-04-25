@@ -17,7 +17,21 @@ from pydantic import BaseModel, Field
 from spacedrep import core
 from spacedrep.models import BulkCardInput, ReviewInput
 
-mcp = FastMCP("spacedrep")
+mcp = FastMCP(
+    "spacedrep",
+    instructions=(
+        "Spacedrep is FSRS-scheduled flashcard review. For each study session: "
+        "generate a UUID session_id and reuse it across all submit_review calls. "
+        "Loop: call get_next_card -> show its question to the user (do NOT show "
+        "the answer) -> compare the user's response to the card's answer -> call "
+        "submit_review with rating (1=again, 2=hard, 3=good, 4=easy), the user's "
+        "verbatim answer text, and a feedback note for future-you. Repeat until "
+        "get_next_card returns no card or due_remaining is 0. Each card response "
+        "includes recent_reviews -- when prior feedback is present, read it before "
+        "grading; it is notes you wrote to your future self about this card's "
+        "recurring confusions. Never ask the user to pick a 1-4 rating; you decide it."
+    ),
+)
 
 _DB_DEFAULT = "./collection.anki21"
 
@@ -131,8 +145,10 @@ def add_card(
     deck: Annotated[str, Field(description="Deck name (created if new)")] = "Default",
     tags: Annotated[str, Field(description="Space-separated tag names")] = "",
 ) -> dict[str, Any]:
-    """Add a new flashcard. Re-adding the same question to the same deck updates
-    the existing card instead of creating a duplicate.
+    """Add a new basic flashcard (one Q→A direction). Re-adding the same question
+    to the same deck updates the existing card instead of creating a duplicate.
+    For bidirectional vocabulary, use add_reversed_card. For fill-in-the-blank
+    over a sentence, use add_cloze_note. For batch creation, use add_cards_bulk.
 
     Dedup matches the question value used at note *creation* — if you
     later edit the Question via update_card and then re-add with the new
@@ -269,10 +285,16 @@ def get_next_card(
         str, Field(description="Only cards due before this datetime (ISO format)")
     ] = "",
 ) -> dict[str, Any]:
-    """Get the next flashcard due for review. Use at the start of a study session.
-    Filter by deck name (includes :: sub-decks), space-separated tags, state, or
-    search text. Tag filter matches the tag and all children (e.g. 'foundations'
-    matches 'foundations::rag'). Returns card details or a message if no cards are due."""
+    """Get the next flashcard due for review. Use at the start of a study session
+    and after each submit_review to drive the loop. Filter by deck name (includes
+    :: sub-decks), space-separated tags, state, or search text. Tag filter matches
+    the tag and all children (e.g. 'foundations' matches 'foundations::rag').
+
+    Response includes recent_reviews (the last 3 reviews of this card with prior
+    user_answer / feedback) so you have past context without a separate
+    get_review_history call. Also includes due_remaining (total cards still due
+    under the same filters, including this one) for session-progress messaging.
+    Returns a no-cards-due message if nothing is queued."""
     result = core.get_next_card(
         _db_path(),
         deck=_or_none(deck),
@@ -405,16 +427,17 @@ def list_cards(
 @_handle_errors
 def get_card(card_id: int) -> dict[str, Any]:
     """Get full detail for a single flashcard by ID. Use to inspect a card's
-    question, answer, FSRS scheduling state, and review history."""
+    question, answer, FSRS scheduling state, and recent reviews. Includes
+    recent_reviews (last 3) inline; for older entries use get_review_history."""
     return _serialize(core.get_card_detail(_db_path(), card_id))
 
 
 @mcp.tool()
 @_handle_errors
 def get_review_history(card_id: int) -> dict[str, Any]:
-    """Get the review history for a card. Returns a list of review entries with
-    rating, rating name, timestamp, and optional user answer/feedback. Use to
-    analyze how a card has been performing over time."""
+    """Full review history for a card. get_next_card and get_card already
+    include the most recent 3 reviews inline; reach for this only when you
+    need older entries or want full failure-pattern analysis."""
     return _serialize(core.get_review_history(_db_path(), card_id))
 
 
@@ -427,8 +450,9 @@ def update_card(
     tags: Annotated[str, Field(description="New space-separated tags")] = "",
     deck: Annotated[str, Field(description="Move card to this deck")] = "",
 ) -> dict[str, Any]:
-    """Update a flashcard's question, answer, tags, or deck. Only non-empty
-    fields are changed. Provide at least one field to update.
+    """Update a flashcard's question, answer, tags, or deck (use after add_card
+    or add_reversed_card to fix typos, retag, or move between decks). Only
+    non-empty fields are changed. Provide at least one field to update.
 
     Field resolution is template-aware. For a reversed card, `question`
     updates the field that renders as *that* card's front (ord=0 writes
@@ -436,10 +460,9 @@ def update_card(
     shows up where you expect. Both cards of a reversed pair share one
     note, so edits propagate to both in the correct positions.
 
-    `deck` is also template-aware: moving a reversed card's deck moves
-    its sibling too (reversed pairs share one note, so splitting them
-    across decks would be silently reverted on the next re-add). For
-    single-template basic cards, `deck` moves only the named card.
+    `deck` is template-aware: moving any sibling card (reversed pair OR
+    cloze deletion) moves all its siblings together — multi-card notes
+    can't be split across decks.
 
     Cloze cards are rejected with an `update_cloze_card` error — use
     update_cloze_note to edit cloze text."""
@@ -458,8 +481,9 @@ def delete_card(
     card_id: int,
     dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
 ) -> dict[str, Any]:
-    """Permanently delete a flashcard and its review history. Use dry_run=true
-    to preview what would be deleted without making changes."""
+    """Permanently delete a flashcard and its review history (use to remove a
+    card the user no longer wants; for temporary removal use suspend_card or
+    bury_card instead). Use dry_run=true to preview what would be deleted."""
     return core.delete_card(_db_path(), card_id, dry_run=dry_run)
 
 
@@ -480,7 +504,8 @@ def unsuspend_card(
     card_id: int,
     dry_run: Annotated[bool, Field(description="Preview without making changes")] = False,
 ) -> dict[str, Any]:
-    """Unsuspend a card to include it in reviews again. Use dry_run=true to preview."""
+    """Unsuspend a card (inverse of suspend_card) to include it in reviews
+    again. Use dry_run=true to preview."""
     return core.unsuspend_card(_db_path(), card_id, dry_run=dry_run)
 
 
@@ -499,7 +524,8 @@ def bury_card(
 @mcp.tool()
 @_handle_errors
 def unbury_card(card_id: int) -> dict[str, Any]:
-    """Remove a card from buried status so it appears in reviews again."""
+    """Remove a card from buried status (inverse of bury_card) so it appears in
+    reviews again before its 24h auto-expiry."""
     return core.unbury_card(_db_path(), card_id)
 
 
@@ -521,8 +547,16 @@ def submit_review(
     rating by comparing the user's answer to the card's correct answer — do not
     ask the user to pick a number. Rating: 1=again (wrong or no answer),
     2=hard (partially correct or missing key details), 3=good (correct),
-    4=easy (use only if the user explicitly says it was easy). Always pass the
-    user's original answer text in the answer field."""
+    4=easy (use only if the user explicitly says it was easy).
+
+    Always pass the user's original answer text in the answer field; both
+    `answer` (user_answer) and `feedback` are persisted and resurface as
+    recent_reviews on this card's next get_next_card. Use feedback to write
+    a note to future-you about this card's recurring confusion.
+
+    Response includes new_due (next review timestamp), interval_days (days
+    until next review — use to tell the user 'next review in N days'), and
+    siblings_buried (cloze/reversed siblings auto-buried for 24h)."""
     review_input = ReviewInput(
         card_id=card_id,
         rating=rating,
@@ -537,7 +571,8 @@ def submit_review(
 @_handle_errors
 def preview_review(card_id: int) -> dict[str, Any]:
     """Preview what each of the 4 ratings (again/hard/good/easy) would produce
-    for a card. Use before submitting a review to see scheduling outcomes."""
+    for a card. Use on borderline grades when the user's answer is partially
+    correct and you can't decide between hard and good."""
     return _serialize(core.preview_review(_db_path(), card_id))
 
 
@@ -549,7 +584,9 @@ def preview_review(card_id: int) -> dict[str, Any]:
 @mcp.tool()
 @_handle_errors
 def list_decks() -> dict[str, object]:
-    """List all decks with their card counts and due counts."""
+    """List all decks with their card counts and due counts. Use at session
+    start to discover available decks before calling get_next_card with a
+    deck filter, or to size up where the user has the most due work."""
     decks = core.list_decks(_db_path())
     return {"decks": [d.model_dump() for d in decks], "total": len(decks)}
 

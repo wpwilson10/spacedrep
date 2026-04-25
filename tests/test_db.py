@@ -871,6 +871,33 @@ def test_bury_siblings_no_match(tmp_db: Path) -> None:
     conn.close()
 
 
+def test_get_review_history_with_limit(populated_db: Path) -> None:
+    """When limit is set, return the most recent N entries in chronological order."""
+    from spacedrep import core
+    from spacedrep.models import ReviewInput
+
+    due = core.get_next_card(populated_db)
+    assert due is not None
+    card_id = due.card_id
+
+    # Submit 5 reviews with distinct user_answer values to identify ordering.
+    for i in range(5):
+        core.submit_review(
+            populated_db,
+            ReviewInput(card_id=card_id, rating=3, user_answer=f"a{i}"),
+        )
+
+    conn = db.get_connection(populated_db)
+    limited = db.get_review_history(conn, card_id, limit=3)
+    full = db.get_review_history(conn, card_id)
+    conn.close()
+
+    assert len(limited) == 3
+    assert len(full) == 5
+    # Limited should be the last 3 of the full list, in chronological order.
+    assert [r.user_answer for r in limited] == [r.user_answer for r in full[-3:]]
+
+
 # --- FSRS state tests ---
 
 

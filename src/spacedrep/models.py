@@ -26,6 +26,8 @@ class CardDue(BaseModel):
     state: str  # "new" | "learning" | "review" | "relearning"
     retrievability: float
     extra_fields: dict[str, str] = {}
+    recent_reviews: list["ReviewLogEntry"] = []
+    due_remaining: int = 0
 
 
 class ReviewResult(BaseModel):
@@ -109,6 +111,7 @@ class CardDetail(BaseModel):
     last_review: str | None = None
     review_count: int = 0
     lapse_count: int = 0
+    recent_reviews: list["ReviewLogEntry"] = []
 
 
 class CardListResult(BaseModel):

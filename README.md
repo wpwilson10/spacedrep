@@ -55,6 +55,15 @@ Add to Claude Desktop (`claude_desktop_config.json`):
 }
 ```
 
+### Agent loop
+
+`get_next_card` → grade → `submit_review`. The server bundles a few affordances for that loop:
+
+- **Loop instructions on connect** — the agent gets the loop, the rating scale, and the rule that it picks the rating (not the user)
+- **Inline review history** — `get_next_card` and `get_card` include the last 3 reviews with their `user_answer` and `feedback` text
+- **Session pacing** — `get_next_card` returns `due_remaining` for "N cards left" messaging
+- **Sibling auto-bury** — `submit_review` buries cloze/reversed siblings for 24h and returns them as `siblings_buried`, so the next card isn't a sibling whose answer was just shown
+
 ## CLI Quick Start
 
 ```bash

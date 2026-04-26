@@ -895,8 +895,8 @@ def get_card_detail(db_path: Path, card_id: int) -> CardDetail:
 def get_review_history(db_path: Path, card_id: int) -> ReviewHistory:
     """Get review history for a card. Raises CardNotFoundError if not found."""
     with _open_db(db_path) as conn:
-        detail = db.get_card_detail(conn, card_id)
-        if detail is None:
+        exists = conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
+        if exists is None:
             raise CardNotFoundError(card_id)
         reviews = db.get_review_history(conn, card_id)
         return ReviewHistory(card_id=card_id, reviews=reviews, total=len(reviews))

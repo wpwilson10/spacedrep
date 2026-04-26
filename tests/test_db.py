@@ -871,6 +871,34 @@ def test_bury_siblings_no_match(tmp_db: Path) -> None:
     conn.close()
 
 
+def test_bury_siblings_returns_buried_ids(tmp_db: Path) -> None:
+    """Burying siblings returns the IDs and writes spacedrep_card_extra rows."""
+    from spacedrep import core
+
+    cloze = core.add_cloze_note(
+        tmp_db, "{{c1::Ottawa}} is the capital of {{c2::Canada}}", deck="Geo"
+    )
+    c1, c2 = cloze.card_ids[0], cloze.card_ids[1]
+
+    conn = db.get_connection(tmp_db)
+    until = "2099-12-31 23:59:59"
+    buried = db.bury_siblings(conn, c1, until)
+    conn.commit()
+
+    assert buried == [c2]
+    row = conn.execute(
+        "SELECT buried_until FROM spacedrep_card_extra WHERE card_id = ?", (c2,)
+    ).fetchone()
+    assert row is not None
+    assert row["buried_until"] == until
+    # The reviewed card itself should NOT have been buried.
+    self_row = conn.execute(
+        "SELECT buried_until FROM spacedrep_card_extra WHERE card_id = ?", (c1,)
+    ).fetchone()
+    assert self_row is None or self_row["buried_until"] is None
+    conn.close()
+
+
 def test_get_review_history_with_limit(populated_db: Path) -> None:
     """When limit is set, return the most recent N entries in chronological order."""
     from spacedrep import core

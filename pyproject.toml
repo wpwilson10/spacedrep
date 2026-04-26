@@ -1,6 +1,6 @@
 [project]
 name = "spacedrep"
-version = "0.4.0"
+version = "0.5.0"
 requires-python = ">=3.12"
 description = "Spaced repetition for AI agents — CLI and MCP server for Anki flashcards"
 license = "MIT"
